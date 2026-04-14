@@ -1,0 +1,31 @@
+{
+  "name": "embeddingclient",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  // Install the project itself (editable) into the pre-built venv after the
+  // workspace is mounted. All heavy deps are already in /opt/venv from the image.
+  "postCreateCommand": "UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
+        "python.terminal.activateEnvironment": false
+      }
+    }
+  },
+
+  "remoteEnv": {
+    "VIRTUAL_ENV": "/opt/venv",
+    "PATH": "/opt/venv/bin:${containerEnv:PATH}"
+  }
+}
