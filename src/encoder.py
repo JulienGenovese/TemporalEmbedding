@@ -18,6 +18,7 @@ Customer C: [tx1, tx2, tx3, tx4, tx5]       ← 5 real transaction
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import torch
 import torch.nn as nn
@@ -26,6 +27,14 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 # Primitive: frequency-bank encoder for continuous values
 # ---------------------------------------------------------------------------
+
+class FeatureSpecProtocol(Protocol):
+    # Una specifica per spiegare come operare
+    name: str
+    n_slots: int
+    def build(self, d_field: int, n_frequencies: int) -> nn.Module: ...
+    def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]: ...
+
 
 class NumericEncoder(nn.Module):
     """Learnable sin/cos frequency bank + linear projection to d_field.
@@ -40,12 +49,15 @@ class NumericEncoder(nn.Module):
 
     def __init__(self, d_field: int = 64, n_frequencies: int = 16):
         super().__init__()
-        self.frequencies = nn.Parameter(torch.logspace(0, 3, n_frequencies))
-        self.projection = nn.Linear(2 * n_frequencies, d_field)
+        self.frequencies = nn.Parameter(torch.logspace(0, 3, n_frequencies)) # frequenze learnable ma parto da guessing, e do dimensione
+        self.projection = nn.Linear(2 * n_frequencies, d_field) # matrice learnable
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        angles = x.unsqueeze(-1) * self.frequencies
-        return self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1))
+        angles = x.unsqueeze(-1) * self.frequencies # aggiunge una dimensione alla fine e moltiplica per le frequenze, dim(X) = (B, Tx, 1) * (dim(f), ) = (B, Tx, dim(f))
+        # se angles ha shape (batch, seq, n_freq) -> torch.cat([..., ...], dim=-1) → (batch, seq, 2*n_freq)
+        # linear applica y = xA^T + b
+        # (batch, seq, 2*n_freq)*(2*n_freq, d_field) = (batch, seq, d_field)
+        return self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1)) 
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +97,7 @@ def _decompose_unix_timestamp(
 # ---------------------------------------------------------------------------
 
 @dataclass
-class NumericFeature:
+class NumericFeature(FeatureSpecProtocol):
     """Continuous numeric field.
 
     If ``signed=True`` the raw value may be negative → encoder splits it into
@@ -102,9 +114,10 @@ class NumericFeature:
         value_enc = NumericEncoder(d_field, n_frequencies)
         if not self.signed:
             return value_enc
+        # module dict instead of dict to register the dict to trace the parameters
         return nn.ModuleDict({
             "value": value_enc,
-            "sign":  nn.Embedding(3, d_field, padding_idx=0),
+            "sign":  nn.Embedding(3, d_field, padding_idx=0), # 0 for padding, 1 for positive and 2 for negative
         })
 
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
@@ -213,7 +226,10 @@ class TransactionEncoder(nn.Module):
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         fields: list[torch.Tensor] = []
         for feat, enc in zip(self.features, self.encoders):
+            # feat.encode lavora sulla colonna di interesse. 
+            # fields e' una lista di n_fields tensori di dimensione (B, seq, d_fields)
             fields.extend(feat.encode(enc, batch))
+        # impiliamo la lista sulla dimensione 2, quindi abbiamo (B, seq, n_fields,d_fields)
         return torch.stack(fields, dim=2)
 
 
@@ -242,7 +258,7 @@ if __name__ == "__main__":
     # numerics = 0.0, long IDs = 0, timestamps = 0.
     batch = {
         "amount":     torch.tensor([[ 120.5, -47.0,  0.0,  0.0],
-                                    [ -9.9,  300.0, 15.0, 0.0]]),
+                                    [ -9.9,  300.0, 9.0, 0.0]]),
         "balance":    torch.tensor([[1000.0, 950.0, 950.0, 0.0],
                                     [ 500.0, 800.0, 815.0, 0.0]]),
         "mcc":        torch.tensor([[ 5411, 5812,  742,   0],
@@ -260,7 +276,8 @@ if __name__ == "__main__":
         "merchant_b": torch.tensor([[901, 234, 55,  0],
                                     [ 55, 901, 300, 0]]),
     }
-
+    for key, value in batch.items():
+        print(key, ": ", value)
     out = encoder(batch)
     print(f"output shape  = {tuple(out.shape)}   (expected ({B}, {T}, 8, {D}))")
 
