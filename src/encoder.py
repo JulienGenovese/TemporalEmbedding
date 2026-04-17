@@ -1,19 +1,4 @@
-"""
-Encoding modules for raw transaction fields.
-
-Each FeatureSpec dataclass owns its own ``build()`` / ``encode()`` / ``n_slots``;
-``TransactionEncoder`` is a thin dispatcher that iterates the schema.
-
-Output shape: (B, T, n_fields, d_field)
-
-We usually don't have the same number of transaction for each customer. For this reason we pad it.
-
-
-Customer A: [tx1, tx2, tx3, tx4, tx5]       ← 5 transazioni reali
-Customer B: [tx1, tx2, tx3,  0,   0]        ← 3 reali + 2 padding
-Customer C: [tx1, tx2, tx3, tx4, tx5]       ← 5 real transaction
-
-"""
+"""Encoding modules for raw transaction fields — see architecture/encoder.md."""
 # to have the same typing in all python 
 from __future__ import annotations
 
@@ -29,7 +14,6 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 
 class FeatureSpecProtocol(Protocol):
-    # Una specifica per spiegare come operare
     name: str
     n_slots: int
     def build(self, d_field: int, n_frequencies: int) -> nn.Module: ...
@@ -49,15 +33,12 @@ class NumericEncoder(nn.Module):
 
     def __init__(self, d_field: int = 64, n_frequencies: int = 16):
         super().__init__()
-        self.frequencies = nn.Parameter(torch.logspace(0, 3, n_frequencies)) # frequenze learnable ma parto da guessing, e do dimensione
-        self.projection = nn.Linear(2 * n_frequencies, d_field) # matrice learnable
+        self.frequencies = nn.Parameter(torch.logspace(0, 3, n_frequencies))
+        self.projection = nn.Linear(2 * n_frequencies, d_field)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        angles = x.unsqueeze(-1) * self.frequencies # aggiunge una dimensione alla fine e moltiplica per le frequenze, dim(X) = (B, Tx, 1) * (dim(f), ) = (B, Tx, dim(f))
-        # se angles ha shape (batch, seq, n_freq) -> torch.cat([..., ...], dim=-1) → (batch, seq, 2*n_freq)
-        # linear applica y = xA^T + b
-        # (batch, seq, 2*n_freq)*(2*n_freq, d_field) = (batch, seq, d_field)
-        return self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1)) 
+        angles = x.unsqueeze(-1) * self.frequencies
+        return self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1))
 
 
 # ---------------------------------------------------------------------------
@@ -226,10 +207,7 @@ class TransactionEncoder(nn.Module):
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         fields: list[torch.Tensor] = []
         for feat, enc in zip(self.features, self.encoders):
-            # feat.encode lavora sulla colonna di interesse. 
-            # fields e' una lista di n_fields tensori di dimensione (B, seq, d_fields)
             fields.extend(feat.encode(enc, batch))
-        # impiliamo la lista sulla dimensione 2, quindi abbiamo (B, seq, n_fields,d_fields)
         return torch.stack(fields, dim=2)
 
 

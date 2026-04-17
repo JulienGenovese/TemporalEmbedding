@@ -1,0 +1,40 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#F5A623', 'primaryTextColor': '#fff', 'primaryBorderColor': '#D4891A', 'lineColor': '#333', 'fontSize': '13px'}}}%%
+graph TD
+    IN["Input from TransactionEncoder<br/>(B, T, 13, 64)"]
+
+    IN --> PROJ
+
+    PROJ["input_proj: Linear(64 → 128)"]
+    FTE["field_type_emb<br/>(13, 128) learnable"]
+
+    PROJ -->|"+"| ADD["(B, T, 13, 128)"]
+    FTE -->|"+"| ADD
+
+    ADD --> RESHAPE1["reshape → (B·T, 13, 128)<br/><i>process all transactions in parallel</i>"]
+
+    RESHAPE1 --> L1["TransformerEncoderLayer 1<br/>pre-LN, 4 heads, d_ff=512"]
+    L1 --> L2["TransformerEncoderLayer 2<br/>pre-LN, 4 heads, d_ff=512"]
+
+    L2 --> POOL
+
+    subgraph POOL["AttentionPooling"]
+        Q["learnable query<br/>(1, 1, 128)"]
+        MHA["MultiheadAttention<br/>1 head"]
+        Q -->|"query"| MHA
+    end
+
+    POOL -->|"(B·T, 128)"| RESHAPE2["reshape → (B, T, 128)"]
+    RESHAPE2 --> LN["LayerNorm(128)"]
+    LN --> OUT["Output (B, T, 128)<br/>→ SequenceTransformer"]
+
+    style IN fill:#E8F0FE,stroke:#4A90D9,color:#333
+    style PROJ fill:#F5A623,stroke:#D4891A,color:#fff
+    style FTE fill:#F5A623,stroke:#D4891A,color:#fff
+    style ADD fill:#F5A623,stroke:#D4891A,color:#fff
+    style RESHAPE1 fill:#FFF3D6,stroke:#D4891A,color:#333
+    style L1 fill:#FF8C00,stroke:#CC7000,color:#fff
+    style L2 fill:#FF8C00,stroke:#CC7000,color:#fff
+    style POOL fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style RESHAPE2 fill:#FFF3D6,stroke:#D4891A,color:#333
+    style LN fill:#50E3C2,stroke:#36B09C,color:#333
+    style OUT fill:#7ED321,stroke:#5CA018,color:#fff

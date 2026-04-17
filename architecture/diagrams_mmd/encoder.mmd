@@ -1,0 +1,55 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#4A90D9', 'primaryTextColor': '#fff', 'primaryBorderColor': '#2E6BA6', 'lineColor': '#333', 'fontSize': '13px'}}}%%
+graph TD
+    BATCH["Batch dict<br/>(B, T) tensors per field"]
+
+    subgraph SCHEMA["Feature Schema (iterated in order)"]
+        direction TB
+
+        subgraph NF["NumericFeature"]
+            NF_U["unsigned: NumericEncoder<br/>→ 1 slot"]
+            NF_S["signed: NumericEncoder(abs)<br/>+ sign Embedding(3)<br/>→ 2 slots"]
+        end
+
+        subgraph CF["CategoricalFeature"]
+            CF_E["nn.Embedding(vocab, d_field)<br/>padding_idx=0<br/>→ 1 slot"]
+        end
+
+        subgraph DF["DatetimeFeature"]
+            DF_DEC["_decompose_unix_timestamp<br/>Fliegel-Van Flandern (GPU-safe)"]
+            DF_H["hour Emb(25)"]
+            DF_W["dow Emb(8)"]
+            DF_D["dom Emb(32)"]
+            DF_DEC --> DF_H
+            DF_DEC --> DF_W
+            DF_DEC --> DF_D
+        end
+
+        subgraph DHF["DoubleHashFeature"]
+            DHF_A["Embedding A (hash_buckets)"]
+            DHF_B["Embedding B (hash_buckets)"]
+            DHF_SUM["sum → 1 slot"]
+            DHF_A --> DHF_SUM
+            DHF_B --> DHF_SUM
+        end
+    end
+
+    BATCH --> SCHEMA
+
+    SCHEMA -->|"list of (B, T, d_field) tensors"| STACK["torch.stack(fields, dim=2)"]
+    STACK -->|"(B, T, n_fields, d_field)"| OUT["Output to FieldTransformer"]
+
+    subgraph NUMENC["NumericEncoder detail"]
+        direction LR
+        X["x (B, T)"] -->|"unsqueeze(-1)"| ANG["angles = x * frequencies<br/>(B, T, n_freq)"]
+        ANG --> SINCOS["[sin, cos]<br/>(B, T, 2·n_freq)"]
+        SINCOS --> PROJ["Linear(2·n_freq, d_field)<br/>(B, T, d_field)"]
+    end
+
+    style SCHEMA fill:#E8F0FE,stroke:#4A90D9,color:#333
+    style NF fill:#4A90D9,stroke:#2E6BA6,color:#fff
+    style CF fill:#F5A623,stroke:#D4891A,color:#fff
+    style DF fill:#7ED321,stroke:#5CA018,color:#fff
+    style DHF fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style NUMENC fill:#F0F0F0,stroke:#999,color:#333
+    style STACK fill:#50E3C2,stroke:#36B09C,color:#333
+    style OUT fill:#50E3C2,stroke:#36B09C,color:#333

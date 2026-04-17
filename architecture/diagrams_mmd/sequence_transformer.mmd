@@ -1,0 +1,49 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#7ED321', 'primaryTextColor': '#fff', 'primaryBorderColor': '#5CA018', 'lineColor': '#333', 'fontSize': '13px'}}}%%
+graph TD
+    IN["Input from FieldTransformer<br/>(B, T, 128)"]
+    DT["delta_t<br/>(B, T) seconds"]
+
+    IN --> CAT
+    CLS["[CLS] token<br/>(1, 1, 128) learnable"] --> CAT
+    CAT["cat([CLS], x)<br/>(B, T+1, 128)"]
+
+    DT --> CLSTIME["prepend 0 for [CLS]<br/>(B, T+1)"]
+    CLSTIME --> TAPE
+
+    subgraph TAPE["TimeAwarePositionalEncoding"]
+        FREQ["fixed frequencies ω<br/>exp-spaced"]
+        ANGLES["angles = Δt · ω"]
+        SC["[sin(angles), cos(angles)]<br/>(B, T+1, 128)"]
+        FREQ --> ANGLES --> SC
+    end
+
+    CAT -->|"+"| SUM["x + PE<br/>(B, T+1, 128)"]
+    TAPE -->|"+"| SUM
+
+    SUM --> L1["Layer 1 — pre-LN, 8 heads, d_ff=512<br/><i>+ gradient checkpoint</i>"]
+    L1 --> L2["Layer 2"]
+    L2 --> L3["Layer 3"]
+    L3 --> L4["Layer 4"]
+
+    L4 --> LN["LayerNorm(128)"]
+    LN --> EXTRACT["x[:, 0, :] — extract [CLS]"]
+    EXTRACT --> HCLS["h_CLS (B, 128)<br/>client embedding"]
+
+    HCLS --> MTM["MTMHead"]
+    HCLS --> CON["ContrastiveHead"]
+
+    style IN fill:#F5A623,stroke:#D4891A,color:#fff
+    style DT fill:#E8F0FE,stroke:#4A90D9,color:#333
+    style CLS fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style CAT fill:#7ED321,stroke:#5CA018,color:#fff
+    style TAPE fill:#4A90D9,stroke:#2E6BA6,color:#fff
+    style SUM fill:#7ED321,stroke:#5CA018,color:#fff
+    style L1 fill:#2ECC71,stroke:#27AE60,color:#fff
+    style L2 fill:#2ECC71,stroke:#27AE60,color:#fff
+    style L3 fill:#2ECC71,stroke:#27AE60,color:#fff
+    style L4 fill:#2ECC71,stroke:#27AE60,color:#fff
+    style LN fill:#50E3C2,stroke:#36B09C,color:#333
+    style EXTRACT fill:#FFF3D6,stroke:#D4891A,color:#333
+    style HCLS fill:#D0021B,stroke:#A00216,color:#fff
+    style MTM fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style CON fill:#BD10E0,stroke:#8B0BA6,color:#fff

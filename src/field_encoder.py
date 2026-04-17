@@ -1,12 +1,5 @@
-"""
-Field Transformer — intra-transaction attention over fields.
+"""Field Transformer — intra-transaction attention over fields. See architecture/field_transformer.md."""
 
-AttentionPooling  — learned attention pooling over the field dimension
-FieldTransformer  — projects d_field → d_model, applies Transformer layers,
-                    attention-pools to a single vector per transaction
-                    
-L'input arriva come (B, T, 13, 64) — batch × sequenza temporale × campi × embedding per campo.
-"""
 
 import torch
 import torch.nn as nn
@@ -59,27 +52,20 @@ class FieldTransformer(nn.Module):
         super().__init__()
         self.d_model = d_model
 
-        # Shared projection from d_field to d_model
-        # serve per svincolare la dimensione degli input dalla dimensione che serve al modello
         self.input_proj = nn.Linear(d_field, d_model)
 
-        # Learnable field-type positional encoding -> serve per evitare importo = amazon merchant=500euro
         self.field_type_emb = nn.Parameter(torch.randn(n_fields, d_model) * 0.02)
 
-        # Transformer encoder layers
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=n_heads,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
-            batch_first=True, #per dire che la prima dimensione e' il batch
-            norm_first=True,  # Pre-LN for training stability
+            batch_first=True,
+            norm_first=True,
         )
-        # prendo il layer e lo impilo n_layers piu' volte.
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
 
-        # Attention pooling: n_fields → 1
-        # questo serve perche' vogliamo arrivare a un punto nello spazio, non n_fields. Potremmo mare un mean pooling ma abbiamo preferito un attention mechanism
         self.pool = AttentionPooling(d_model)
 
         self.layer_norm = nn.LayerNorm(d_model)

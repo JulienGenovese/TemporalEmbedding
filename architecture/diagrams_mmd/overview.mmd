@@ -1,0 +1,58 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#4A90D9', 'primaryTextColor': '#fff', 'primaryBorderColor': '#2E6BA6', 'lineColor': '#333', 'secondaryColor': '#F5A623', 'tertiaryColor': '#7ED321', 'background': '#ffffff', 'fontSize': '14px'}}}%%
+graph TD
+    subgraph INPUT["Raw Batch (B, T)"]
+        direction LR
+        NUM["importo, saldo_post, delta_t<br/><i>float</i>"]
+        HASH["merchant_a, merchant_b<br/><i>int — double hash</i>"]
+        CAT["mcc, canale, macro_tipo,<br/>sotto_tipo, divisa<br/><i>int — categorical</i>"]
+        TS["timestamp<br/><i>int64 — unix epoch</i>"]
+        PAD["padding_mask<br/><i>bool</i>"]
+    end
+
+    INPUT --> TE
+
+    subgraph TE["TransactionEncoder"]
+        direction LR
+        TE_NUM["NumericFeature<br/>sinusoidal projection"]
+        TE_CAT["CategoricalFeature<br/>nn.Embedding"]
+        TE_HASH["DoubleHashFeature<br/>embed_a + embed_b"]
+        TE_DT["DatetimeFeature<br/>hour / dow / dom"]
+    end
+
+    TE -->|"(B, T, 13, 64)"| FT
+
+    subgraph FT["FieldTransformer"]
+        FT_PROJ["Linear(64 → 128)<br/>+ field_type_emb (13, 128)"]
+        FT_TRANS["TransformerEncoder<br/>2 layers, 4 heads, pre-LN"]
+        FT_POOL["AttentionPooling<br/>13 fields → 1 vector"]
+        FT_NORM["LayerNorm(128)"]
+        FT_PROJ --> FT_TRANS --> FT_POOL --> FT_NORM
+    end
+
+    FT -->|"(B, T, 128)"| ST
+
+    subgraph ST["SequenceTransformer"]
+        ST_CLS["Prepend [CLS] token"]
+        ST_PE["TimeAwarePositionalEncoding<br/>sin/cos from delta_t"]
+        ST_TRANS["TransformerEncoder<br/>4 layers, 8 heads, pre-LN<br/>+ gradient checkpointing"]
+        ST_NORM["LayerNorm(128)"]
+        ST_EXTRACT["Extract x[:, 0, :] → h_CLS"]
+        ST_CLS --> ST_PE --> ST_TRANS --> ST_NORM --> ST_EXTRACT
+    end
+
+    ST -->|"h_CLS (B, 128)"| HEADS
+
+    subgraph HEADS["Pre-training Heads (removable)"]
+        direction LR
+        MTM["MTMHead<br/>categorical: cross-entropy<br/>numeric: smooth-L1"]
+        CON["ContrastiveHead<br/>Linear → ReLU → Linear<br/>L2 normalize → InfoNCE"]
+    end
+
+    HEADS -->|"L = L_mtm + λ · L_contrastive"| LOSS["Combined Loss"]
+
+    style INPUT fill:#E8F0FE,stroke:#4A90D9,color:#333
+    style TE fill:#4A90D9,stroke:#2E6BA6,color:#fff
+    style FT fill:#F5A623,stroke:#D4891A,color:#fff
+    style ST fill:#7ED321,stroke:#5CA018,color:#fff
+    style HEADS fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style LOSS fill:#D0021B,stroke:#A00216,color:#fff

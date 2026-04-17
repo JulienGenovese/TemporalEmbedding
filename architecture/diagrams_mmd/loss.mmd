@@ -1,0 +1,47 @@
+%%{init: {'theme': 'base', 'themeVariables': {'primaryColor': '#BD10E0', 'primaryTextColor': '#fff', 'primaryBorderColor': '#8B0BA6', 'lineColor': '#333', 'fontSize': '13px'}}}%%
+graph TD
+    HCLS["h_CLS (B, 128)"]
+    TX["transaction embeddings<br/>(B, T, 128)"]
+
+    TX --> MTM
+    HCLS --> CON
+
+    subgraph MTM["MTMHead — Masked Token Modeling"]
+        direction TB
+        MTM_CAT["Categorical heads<br/>Linear(128 → vocab_size) per field<br/><i>mcc, canale, macro_tipo, sotto_tipo, divisa</i>"]
+        MTM_NUM["Numeric heads<br/>Linear(128 → 1) per field<br/><i>importo, saldo_post, delta_t</i>"]
+        MTM_FULL["Full reconstruction<br/>Linear(128 → 128)"]
+
+        MTM_CAT --> LCAT["Cross-entropy loss<br/>on masked positions"]
+        MTM_NUM --> LNUM["Smooth-L1 loss<br/>on masked positions"]
+        MTM_FULL --> LFULL["MSE loss"]
+    end
+
+    subgraph CON["ContrastiveHead — InfoNCE"]
+        direction TB
+        PROJ1["Linear(128, 128)"]
+        RELU["ReLU"]
+        PROJ2["Linear(128, 64)"]
+        NORM["L2 normalize"]
+        PROJ1 --> RELU --> PROJ2 --> NORM
+
+        NORM --> SIM["Similarity: z @ z.T / τ"]
+        TEMP["learnable τ<br/>init=0.07, range [0.01, 1.0]"] --> SIM
+        SIM --> LNCE["InfoNCE loss<br/>positives = same client<br/>negatives = rest of batch"]
+    end
+
+    LCAT --> LMTM["L_mtm = avg(losses)"]
+    LNUM --> LMTM
+    LFULL --> LMTM
+
+    LMTM --> TOTAL["L = L_mtm + λ · L_contrastive<br/><i>default λ = 0.5</i>"]
+    LNCE --> TOTAL
+
+    TOTAL --> USE["After pre-training:<br/>remove heads, use h_CLS<br/>→ fine-tuning or XGBoost"]
+
+    style MTM fill:#F5A623,stroke:#D4891A,color:#fff
+    style CON fill:#BD10E0,stroke:#8B0BA6,color:#fff
+    style TOTAL fill:#D0021B,stroke:#A00216,color:#fff
+    style USE fill:#7ED321,stroke:#5CA018,color:#fff
+    style HCLS fill:#4A90D9,stroke:#2E6BA6,color:#fff
+    style TX fill:#4A90D9,stroke:#2E6BA6,color:#fff
