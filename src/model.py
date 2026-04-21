@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .encoder import (
     TransactionEncoder,
-    NumericFeature, CategoricalFeature, DatetimeFeature, DoubleHashFeature,
+    NumericFeature, CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
     FeatureSpec, categorical_vocab_sizes,
 )
 from .field_encoder import FieldTransformer
@@ -20,7 +20,7 @@ DEFAULT_FEATURES: list[FeatureSpec] = [
     NumericFeature("importo", signed=True),
     NumericFeature("saldo_post"),
     NumericFeature("delta_t"),
-    DoubleHashFeature("merchant"),
+    HighCardCategoricalFeature("merchant"),
     CategoricalFeature("mcc",        801),
     CategoricalFeature("canale",      11),
     CategoricalFeature("macro_tipo",   9),
@@ -168,9 +168,8 @@ if __name__ == "__main__":
         "importo":    torch.randn(B, T, device=device) * 500,
         "saldo_post": torch.randn(B, T, device=device) * 1000,
         "delta_t":    torch.abs(torch.randn(B, T, device=device)) * 86400,
-        # Merchant double-hash (keys: merchant_a, merchant_b)
-        "merchant_a": torch.randint(1, 8192, (B, T), device=device),
-        "merchant_b": torch.randint(1, 8192, (B, T), device=device),
+        # Merchant (raw IDs — double hash computed internally)
+        "merchant":   torch.randint(1, 100_000, (B, T), device=device),
         # Categoricals
         "mcc":        torch.randint(1, 800, (B, T), device=device),
         "canale":     torch.randint(1, 10,  (B, T), device=device),

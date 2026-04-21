@@ -17,7 +17,7 @@ import torch.nn as nn
 
 from .model import TransactionTransformer, DEFAULT_FEATURES, count_parameters
 from .encoder import (
-    NumericFeature, CategoricalFeature, DatetimeFeature, DoubleHashFeature,
+    NumericFeature, CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
     FeatureSpec,
 )
 from .loss import combined_pretrain_loss
@@ -56,7 +56,7 @@ def make_synthetic_batch(
             batch[feat.name] = vals
         elif isinstance(feat, CategoricalFeature):
             batch[feat.name] = torch.randint(1, feat.vocab_size, (B, T), device=device)
-        elif isinstance(feat, DoubleHashFeature):
+        elif isinstance(feat, HighCardCategoricalFeature):
             batch[f"{feat.name}_a"] = torch.randint(1, feat.hash_buckets, (B, T), device=device)
             batch[f"{feat.name}_b"] = torch.randint(1, feat.hash_buckets, (B, T), device=device)
         elif isinstance(feat, DatetimeFeature):
@@ -89,7 +89,7 @@ def build_mtm_targets(
 
     for feat in features:
         # Keys to grab from the batch
-        if isinstance(feat, DoubleHashFeature):
+        if isinstance(feat, HighCardCategoricalFeature):
             # MTM doesn't target hash fields; skip
             continue
         if isinstance(feat, DatetimeFeature):

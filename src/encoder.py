@@ -2,11 +2,94 @@
 # to have the same typing in all python 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import torch
 import torch.nn as nn
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary — maps raw categorical values → contiguous indices
+# ---------------------------------------------------------------------------
+
+class Vocabulary:
+    """Bijection from raw categorical values to contiguous indices (0 = padding).
+
+    Call ``fit(values)`` on raw training data, then pass raw-valued tensors
+    directly into the encoder — the mapping is applied automatically.
+    """
+
+    def __init__(self) -> None:
+        self._val2idx: dict[int, int] = {}
+        self._lookup: torch.Tensor | None = None
+
+    def fit(self, values) -> Vocabulary:
+        unique = sorted(set(int(v) for v in values if int(v) != 0))
+        self._val2idx = {v: i + 1 for i, v in enumerate(unique)}
+        if unique:
+            lookup = torch.zeros(max(unique) + 1, dtype=torch.long)
+            for v, idx in self._val2idx.items():
+                lookup[v] = idx
+        else:
+            lookup = torch.zeros(1, dtype=torch.long)
+        self._lookup = lookup
+        return self
+
+    @property
+    def size(self) -> int:
+        return len(self._val2idx) + 1
+
+    def __call__(self, ids: torch.Tensor) -> torch.Tensor:
+        if self._lookup is None:
+            raise RuntimeError("Vocabulary not fitted — call fit() first")
+        return self._lookup.to(ids.device)[ids.long().clamp(max=len(self._lookup) - 1)]
+
+
+# ---------------------------------------------------------------------------
+# NumericNormalizer — clip + log1p + standardise from fitted statistics
+# ---------------------------------------------------------------------------
+
+class NumericNormalizer:
+    """Learns clip bound (percentile), then applies clip → log1p → z-score.
+
+    Fitted on non-zero values only (zeros are treated as padding and preserved).
+    For signed features pass the raw (possibly negative) values — the normalizer
+    takes ``abs()`` internally during both ``fit()`` and ``__call__()``.
+    """
+
+    def __init__(self, clip_pct: float = 99.0) -> None:
+        self.clip_pct = clip_pct
+        self._clip_hi: float = 0.0
+        self._mean: float = 0.0
+        self._std: float = 1.0
+        self._signed: bool = False
+        self._fitted: bool = False
+
+    def fit(self, values, *, signed: bool = False) -> NumericNormalizer:
+        self._signed = signed
+        t = torch.as_tensor(values, dtype=torch.float32)
+        if signed:
+            t = t.abs()
+        nonzero = t[t != 0]
+        if len(nonzero) == 0:
+            self._fitted = True
+            return self
+        self._clip_hi = float(torch.quantile(nonzero, self.clip_pct / 100.0))
+        transformed = torch.log1p(nonzero.clamp(max=self._clip_hi))
+        self._mean = float(transformed.mean())
+        self._std = float(transformed.std().clamp(min=1e-8))
+        self._fitted = True
+        return self
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if not self._fitted:
+            raise RuntimeError("NumericNormalizer not fitted — call fit() first")
+        if self._signed:
+            x = x.abs()
+        mask = x == 0
+        out = (torch.log1p(x.clamp(min=0, max=self._clip_hi)) - self._mean) / self._std
+        return out.masked_fill(mask, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +171,18 @@ class NumericFeature(FeatureSpecProtocol):
 
     If ``signed=True`` the raw value may be negative → encoder splits it into
     abs(x) (NumericEncoder) + a sign embedding, yielding 2 field slots.
+
+    Call ``fit(raw_values)`` to learn a ``NumericNormalizer`` (clip → log1p →
+    z-score) that is applied automatically at encode time.  Without ``fit()``,
+    the raw values are passed directly to the frequency bank (legacy mode).
     """
     name: str
     signed: bool = False
+    normalizer: NumericNormalizer | None = field(default=None, repr=False)
+
+    def fit(self, values, *, clip_pct: float = 99.0) -> NumericFeature:
+        self.normalizer = NumericNormalizer(clip_pct).fit(values, signed=self.signed)
+        return self
 
     @property
     def n_slots(self) -> int:
@@ -109,30 +201,48 @@ class NumericFeature(FeatureSpecProtocol):
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
         x = batch[self.name]
         if not self.signed:
-            return [module(x)]
+            return [module(self.normalizer(x) if self.normalizer else x)]
         sign_ids = (x > 0).long() + (x < 0).long() * 2   # 0=zero/pad, 1=pos, 2=neg
-        return [module["value"](x.abs()), module["sign"](sign_ids)]
+        norm_abs = self.normalizer(x) if self.normalizer else x.abs()
+        return [module["value"](norm_abs), module["sign"](sign_ids)]
 
 
 @dataclass
-class CategoricalFeature:
-    """Integer-ID categorical field → ``nn.Embedding(vocab_size, d_field, padding_idx=0)``."""
+class CategoricalFeature(FeatureSpecProtocol):
+    """Integer-ID categorical field → ``nn.Embedding(vocab_size, d_field, padding_idx=0)``.
+
+    Two usage modes:
+      1. Explicit ``vocab_size`` — batch values are already contiguous indices.
+      2. Call ``fit(raw_values)`` — builds a ``Vocabulary`` that maps raw IDs to
+         contiguous indices automatically at encode time.
+    """
     name: str
-    vocab_size: int
+    vocab_size: int | None = None
+    vocab: Vocabulary | None = field(default=None, repr=False)
+
+    def fit(self, values) -> CategoricalFeature:
+        self.vocab = Vocabulary().fit(values)
+        self.vocab_size = self.vocab.size
+        return self
 
     @property
     def n_slots(self) -> int:
         return 1
 
     def build(self, d_field: int, n_frequencies: int) -> nn.Module:
+        if self.vocab_size is None:
+            raise RuntimeError(f"CategoricalFeature('{self.name}'): set vocab_size or call fit() first")
         return nn.Embedding(self.vocab_size, d_field, padding_idx=0)
 
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
-        return [module(batch[self.name])]
+        ids = batch[self.name]
+        if self.vocab is not None:
+            ids = self.vocab(ids)
+        return [module(ids)]
 
 
 @dataclass
-class DatetimeFeature:
+class DatetimeFeature(FeatureSpecProtocol):
     """Unix-timestamp field (int64 seconds; 0 = padding), decomposed into
     hour_of_day [1..24], day_of_week [1..7], day_of_month [1..31] — 3 slots."""
     name: str
@@ -154,9 +264,13 @@ class DatetimeFeature:
 
 
 @dataclass
-class HighCardCategoricalFeature:
-    """High-cardinality field via double hashing.  Expects batch keys
-    ``f"{name}_a"`` and ``f"{name}_b"`` (pre-computed bucket IDs)."""
+class HighCardCategoricalFeature(FeatureSpecProtocol):
+    """High-cardinality field via double hashing.
+
+    Accepts raw integer IDs in ``batch[name]`` and computes two independent
+    hash buckets internally (Knuth multiplicative hashing with different primes).
+    Padding (ID == 0) is preserved as bucket 0.
+    """
     name: str
     hash_buckets: int = 8192
 
@@ -170,9 +284,17 @@ class HighCardCategoricalFeature:
             nn.Embedding(self.hash_buckets, d_field, padding_idx=0),
         ])
 
+    @staticmethod
+    def _double_hash(ids: torch.Tensor, n_buckets: int) -> tuple[torch.Tensor, torch.Tensor]:
+        mask = ids == 0
+        h_a = ids.long() * 2654435761 % (n_buckets - 1) + 1
+        h_b = ids.long() * 2246822519 % (n_buckets - 1) + 1
+        return h_a.masked_fill(mask, 0), h_b.masked_fill(mask, 0)
+
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
         emb_a, emb_b = module
-        return [emb_a(batch[f"{self.name}_a"]) + emb_b(batch[f"{self.name}_b"])]
+        h_a, h_b = self._double_hash(batch[self.name], self.hash_buckets)
+        return [emb_a(h_a) + emb_b(h_b)]
 
 
 FeatureSpec = NumericFeature | CategoricalFeature | DatetimeFeature | HighCardCategoricalFeature
@@ -227,18 +349,26 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Example 1 — minimal schema, one feature of each type
     # ------------------------------------------------------------------
+    # Simulate raw training data for fitting
+    raw_amounts  = [120.5, -47.0, -9.9, 300.0, 9.0, -500.0, 15.3, 88.0]
+    raw_balances = [1000.0, 950.0, 500.0, 800.0, 815.0, 1200.0, 340.0]
+    raw_mccs     = [5411, 5812, 742, 5999, 100, 200]
+
+    mcc_feature = CategoricalFeature("mcc").fit(raw_mccs)
     features: list[FeatureSpec] = [
-        NumericFeature("amount", signed=True),   # 2 slots (abs + sign)
-        NumericFeature("balance"),               # 1 slot
-        CategoricalFeature("mcc", vocab_size=10_000),
+        NumericFeature("amount", signed=True).fit(raw_amounts),    # 2 slots (abs + sign)
+        NumericFeature("balance").fit(raw_balances),                # 1 slot
+        mcc_feature,
         DatetimeFeature("timestamp"),            # 3 slots (hour, dow, dom)
         HighCardCategoricalFeature("merchant", hash_buckets=1024),
     ]
     encoder = TransactionEncoder(features, d_field=D, n_frequencies=8)
     print(f"n_fields = {encoder.n_fields}   (expected 8 = 2+1+1+3+1)")
+    print(f"mcc vocab_size = {mcc_feature.vocab_size}  (auto-fitted from 6 unique values + padding)")
 
     # Build a batch.  Padding is position T-1 in every row:
     # numerics = 0.0, long IDs = 0, timestamps = 0.
+    # Categoricals and high-card fields use raw IDs — indexing is automatic.
     batch = {
         "amount":     torch.tensor([[ 120.5, -47.0,  0.0,  0.0],
                                     [ -9.9,  300.0, 9.0, 0.0]]),
@@ -254,10 +384,8 @@ if __name__ == "__main__":
                                      1_583_020_800,   # 2020-03-01
                                      1_614_556_800,   # 2021-03-01
                                      0]]),
-        "merchant_a": torch.tensor([[ 42, 113,  7,  0],
+        "merchant":   torch.tensor([[ 42, 113,  7,  0],
                                     [  7,  42, 999, 0]]),
-        "merchant_b": torch.tensor([[901, 234, 55,  0],
-                                    [ 55, 901, 300, 0]]),
     }
     for key, value in batch.items():
         print(key, ": ", value)
@@ -284,7 +412,7 @@ if __name__ == "__main__":
     # Example 4 — extending the schema: just add specs, no encoder changes
     # ------------------------------------------------------------------
     extended = features + [
-        CategoricalFeature("channel", vocab_size=10),
+        CategoricalFeature("channel").fit(range(1, 10)),
         NumericFeature("fee"),
     ]
     big_encoder = TransactionEncoder(extended, d_field=D)

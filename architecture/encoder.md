@@ -35,7 +35,7 @@ for feat, enc in zip(self.features, self.encoders):
 | `NumericFeature(name, signed=True)` | `name` (float) | 2 | `NumericEncoder(abs)` + `nn.Embedding(3, d_field)` sign (0=pad/zero, 1=pos, 2=neg) |
 | `CategoricalFeature(name, vocab_size)` | `name` (long) | 1 | `nn.Embedding(vocab_size, d_field, padding_idx=0)` |
 | `DatetimeFeature(name)` | `name` (int64 Unix ts, 0 = pad) | 3 | Three `nn.Embedding`s — decomposes via `_decompose_unix_timestamp` into hour[1..24] / dow[1..7] / dom[1..31] using the Fliegel-Van Flandern Julian Day algorithm (all integer tensor arithmetic, GPU-safe) |
-| `DoubleHashFeature(name, hash_buckets=8192)` | `name_a`, `name_b` (long) | 1 | Two independent `nn.Embedding`s, summed |
+| `HighCardCategoricalFeature(name, hash_buckets=8192)` | `name_a`, `name_b` (long) | 1 | Two independent `nn.Embedding`s, summed |
 
 ## NumericEncoder
 

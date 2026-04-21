@@ -37,7 +37,7 @@ Raw fields → TransactionEncoder → FieldTransformer → SequenceTransformer �
 │                                                               │
 │  NumericFeature   → sinusoidal projection → (B, T, n_f, 64)  │
 │  CategoricalFeature → nn.Embedding        → (B, T, 1,   64)  │
-│  DoubleHashFeature  → embed_a + embed_b   → (B, T, 1,   64)  │
+│  HighCardCategoricalFeature  → embed_a + embed_b   → (B, T, 1,   64)  │
 │  DatetimeFeature    → hour/dow/month embs → (B, T, 3,   64)  │
 │                                                               │
 │  Stack along field dim → (B, T, 13, 64)                      │
