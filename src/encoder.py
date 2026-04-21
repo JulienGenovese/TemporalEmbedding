@@ -14,9 +14,14 @@ import torch.nn as nn
 # ---------------------------------------------------------------------------
 
 class FeatureSpecProtocol(Protocol):
-    name: str
+    
+    #feature name
+    name: str 
+    # number of tensors returned 
     n_slots: int
-    def build(self, d_field: int, n_frequencies: int) -> nn.Module: ...
+    # constructor of the class
+    def build(self, d_field: int, n_frequencies: int) -> nn.Module: ... 
+    # main
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]: ...
 
 
@@ -149,7 +154,7 @@ class DatetimeFeature:
 
 
 @dataclass
-class DoubleHashFeature:
+class HighCardCategoricalFeature:
     """High-cardinality field via double hashing.  Expects batch keys
     ``f"{name}_a"`` and ``f"{name}_b"`` (pre-computed bucket IDs)."""
     name: str
@@ -170,7 +175,7 @@ class DoubleHashFeature:
         return [emb_a(batch[f"{self.name}_a"]) + emb_b(batch[f"{self.name}_b"])]
 
 
-FeatureSpec = NumericFeature | CategoricalFeature | DatetimeFeature | DoubleHashFeature
+FeatureSpec = NumericFeature | CategoricalFeature | DatetimeFeature | HighCardCategoricalFeature
 
 
 def categorical_vocab_sizes(features: list[FeatureSpec]) -> dict[str, int]:
@@ -227,7 +232,7 @@ if __name__ == "__main__":
         NumericFeature("balance"),               # 1 slot
         CategoricalFeature("mcc", vocab_size=10_000),
         DatetimeFeature("timestamp"),            # 3 slots (hour, dow, dom)
-        DoubleHashFeature("merchant", hash_buckets=1024),
+        HighCardCategoricalFeature("merchant", hash_buckets=1024),
     ]
     encoder = TransactionEncoder(features, d_field=D, n_frequencies=8)
     print(f"n_fields = {encoder.n_fields}   (expected 8 = 2+1+1+3+1)")
