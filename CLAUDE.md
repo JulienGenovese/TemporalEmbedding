@@ -10,14 +10,25 @@ This project uses **uv** (requires Python 3.14) and has no test framework config
 # Install / sync dependencies
 uv sync
 
-# Run the model's built-in smoke test (forward pass + shape checks)
+# Forward-pass smoke test (shape checks only, synthetic in-memory batch)
 uv run python -m src.model
+
+# Generate the synthetic CSV dataset (~10k rows / 100 clients) under data/
+uv run python -m src.make_dataset
+
+# Full end-to-end pre-training (MTM + InfoNCE) on the CSV — CPU-friendly defaults
+uv run python -m src.train
+
+# Plot the training curves saved by src.train (reads checkpoints/history.json)
+uv run python -m src.plots
 
 # Run arbitrary scripts
 uv run python -m src.<module>
 ```
 
 Scripts inside `src/` use relative imports (`from .encoder import ...`), so always invoke them via `python -m src.<name>` rather than `python src/<name>.py`.
+
+`src.train` runs in ~30s on CPU with the default settings (2 epochs × 12 batches × 16 samples) and writes `checkpoints/model_final.pt`.
 
 ## Architecture
 
@@ -30,7 +41,7 @@ batch (dict of (B,T) tensors)
 TransactionEncoder      src/encoder.py          → (B, T, n_fields, d_field)
         │   schema-driven: per-field sub-encoders
         ▼
-FieldTransformer        src/field_encoder.py    → (B, T, d_model)
+FieldTransformer        src/field_transformer.py → (B, T, d_model)
         │   intra-transaction attention + AttentionPooling across fields
         ▼
 SequenceTransformer     src/sequence_encoder.py → (B, d_model)
@@ -57,7 +68,7 @@ for feat, enc in zip(self.features, self.encoders):
 | `NumericFeature(name, signed=True)`  | `name` (float) | 2 | `NumericEncoder(abs)` + `nn.Embedding(3, d_field)` sign (0=pad/zero, 1=pos, 2=neg) |
 | `CategoricalFeature(name, vocab_size)` | `name` (long) | 1 | `nn.Embedding(vocab_size, d_field, padding_idx=0)` |
 | `DatetimeFeature(name)` | `name` (int64 Unix ts, 0 = pad) | 3 | three `nn.Embedding`s — encoder decomposes via `_decompose_unix_timestamp` into hour[1..24] / dow[1..7] / dom[1..31] using the Fliegel-Van Flandern Julian Day algorithm (all integer tensor arithmetic, GPU-safe) |
-| `HighCardCategoricalFeature(name, hash_buckets=8192)` | `name_a`, `name_b` (long) | 1 | two independent `nn.Embedding`s, summed |
+| `HighCardCategoricalFeature(name, hash_buckets=5003)` | `name` (long, raw int IDs — strings can be pre-converted via `HighCardCategoricalFeature.prepare`/`._to_int` which uses FNV-1a) | 1 | two independent `nn.Embedding`s, summed (double-hash computed internally via Knuth multiplicative constants) |
 
 **Adding a new feature type** = one new dataclass with `build` / `encode` / `n_slots`, zero changes elsewhere.
 
@@ -78,3 +89,48 @@ Padding is represented by **index 0** for categoricals/hashes and **value 0** fo
 ## Notes on modifying the schema
 
 Adding a new feature: append a spec to `DEFAULT_FEATURES` in `src/model.py`, provide the expected batch key(s) at forward time. No other edits needed — `TransactionEncoder`, `FieldTransformer`, and `MTMHead` all adapt automatically.
+
+## Synthetic data pipeline (CPU smoke test)
+
+```
+src/make_dataset.py   ──▶  data/transactions.csv  (10 000 rows, 100 clients)
+                                  │
+                                  ▼
+src/data.py           load_dataframe → fit_features (numeric normalizers via
+                      NumericFeature.fit) → TransactionDataset (per-client
+                      windows of length seq_len, delta_t computed from
+                      consecutive timestamps, right-padded) → 
+                      PairedClientBatchSampler (≥2 windows per client per
+                      batch, so InfoNCE always sees positive pairs) → collate
+                                  │
+                                  ▼
+src/train.py          builds the model with the fitted features, runs the
+                      joint MTM + InfoNCE objective, saves
+                      checkpoints/model_final.pt
+```
+
+CSV columns: `client_id, timestamp, importo, saldo_post, merchant, mcc, canale, macro_tipo, sotto_tipo, divisa`. `merchant` is a string; `data.py` hashes it to an int64 ID via `HighCardCategoricalFeature._to_int` (FNV-1a) before tensorising.
+
+`delta_t` is **derived** at load time from per-client `np.diff(timestamp)` — the CSV does not store it.
+
+`fit_features` only fits `NumericNormalizer`s; categorical vocab sizes are kept at the explicit values in `DEFAULT_FEATURES` (the synthetic generator stays inside those ranges).
+
+## Training metrics & plotting
+
+`src.train` records one entry per step into ``checkpoints/history.json``:
+
+| Field             | Meaning                                                       |
+|-------------------|---------------------------------------------------------------|
+| `loss`            | total loss = MTM + λ·InfoNCE                                  |
+| `loss_mtm`        | masked-token-modeling loss (averaged over fields with masked positions) |
+| `loss_contrastive`| InfoNCE                                                       |
+| `infonce_acc`     | top-1 retrieval accuracy in-batch (`info_nce_accuracy` in `src/loss.py`) |
+| `temperature`     | learnable temperature of the contrastive head                 |
+| `grad_norm`       | total grad norm before clipping                               |
+| `mtm_breakdown`   | dict `{cat_<name>: CE, num_<name>: smoothL1}` per masked field |
+
+`src.plots` reads that JSON and writes:
+* ``checkpoints/plots/training_curves.png`` — 6-panel summary (totale, MTM in log, InfoNCE, accuracy, temperature, grad norm) with a moving-average overlay
+* ``checkpoints/plots/mtm_breakdown.png``  — per-field MTM curves (categorical CE on linear axis, numeric smooth-L1 on log axis)
+
+Note: numeric MTM targets are the **raw** field values, not the normalised ones the encoder consumes. As a result `loss_mtm` is dominated by `saldo_post` and `delta_t`. The contrastive head still learns; this asymmetry is a known design point of `MTMHead` and not a bug introduced by the data pipeline.

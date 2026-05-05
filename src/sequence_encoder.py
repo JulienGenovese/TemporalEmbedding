@@ -35,6 +35,7 @@ class TimeAwarePositionalEncoding(nn.Module):
         # PE(Δt)=[sin(ω0​Δt),sin(ω1​Δt),…,sin(ω63​Δt),cos(ω0​Δt),cos(ω1​Δt),…,cos(ω63​Δt)]
 
         """
+        # TODO: l'e_cls non fa distionzione con l'e_t0
         angles = delta_t.unsqueeze(-1) * self.freqs  # (B, T+1, d_model/2)
         return torch.cat([angles.sin(), angles.cos()], dim=-1)  # (B, T+1, d_model)
 

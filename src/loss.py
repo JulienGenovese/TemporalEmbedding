@@ -13,50 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# https://towardsdatascience.com/self-supervised-learning-using-projection-heads-b77af3911d33/
-class MTMHead(nn.Module):
-    """Masked Token Modeling head.
 
-    Reconstructs masked fields:
-    - Categorical fields: linear → vocab logits → cross-entropy
-    - Numeric fields: linear → scalar → smooth-L1
-    - Full transaction masking: linear → d_model vector → MSE
-    """
-
-    def __init__(self, d_model: int = 128, vocab_sizes: dict[str, int] | None = None):
-        super().__init__()
-        if vocab_sizes is None:
-            vocab_sizes = {}
-
-        # One classification head per categorical field
-        self.cat_heads = nn.ModuleDict({
-            name: nn.Linear(d_model, vocab_size)
-            for name, vocab_size in vocab_sizes.items()
-        })
-
-        # Numeric regression heads (importo, saldo_post, delta_t)
-        self.num_heads = nn.ModuleDict({
-            name: nn.Linear(d_model, 1)
-            for name in ["importo", "saldo_post", "delta_t"]
-        })
-
-        # Full transaction reconstruction head
-        self.full_recon = nn.Linear(d_model, d_model)
-
-    def forward(self, hidden_states: torch.Tensor) -> dict:
-        """
-        Args:
-            hidden_states: (B, T, d_model) — sequence transformer outputs (excl. [CLS])
-        Returns:
-            dict with logits/predictions for each field
-        """
-        preds = {}
-        for name, head in self.cat_heads.items():
-            preds[f"cat_{name}"] = head(hidden_states)              # (B, T, vocab)
-        for name, head in self.num_heads.items():
-            preds[f"num_{name}"] = head(hidden_states).squeeze(-1)  # (B, T)
-        preds["full_recon"] = self.full_recon(hidden_states)        # (B, T, d_model)
-        return preds
 
 
 class ContrastiveHead(nn.Module):
@@ -91,7 +48,8 @@ class ContrastiveHead(nn.Module):
         return F.normalize(z, dim=-1)
 
 
-def info_nce_loss(z: torch.Tensor, client_ids: torch.Tensor,
+def info_nce_loss(z: torch.Tensor, 
+                  client_ids: torch.Tensor,
                   temperature: torch.Tensor) -> torch.Tensor:
     """InfoNCE (NT-Xent) contrastive loss with in-batch negatives.
 
@@ -128,18 +86,77 @@ def info_nce_loss(z: torch.Tensor, client_ids: torch.Tensor,
     return loss
 
 
-def mtm_loss(preds: dict, targets: dict, mask: dict) -> torch.Tensor:
+# https://towardsdatascience.com/self-supervised-learning-using-projection-heads-b77af3911d33/
+class MTMHead(nn.Module):
+    """Masked Token Modeling head.
+
+    Reconstructs masked fields:
+    - Categorical fields: linear → vocab logits → cross-entropy
+    - Numeric fields: linear → scalar → smooth-L1
+    - Full transaction masking: linear → d_model vector → MSE
+    """
+
+    def __init__(
+        self,
+        d_model: int = 128,
+        vocab_sizes: dict[str, int] | None = None,
+        numeric_names: list[str] | None = None,
+    ):
+        super().__init__()
+        if vocab_sizes is None:
+            vocab_sizes = {}
+        if numeric_names is None:
+            numeric_names = []
+
+        # One classification head per categorical field
+        self.cat_heads = nn.ModuleDict({
+            name: nn.Linear(d_model, vocab_size)
+            for name, vocab_size in vocab_sizes.items()
+        })
+
+        # One regression head per numeric field
+        self.num_heads = nn.ModuleDict({
+            name: nn.Linear(d_model, 1)
+            for name in numeric_names
+        })
+
+        # Full transaction reconstruction head
+        self.full_recon = nn.Linear(d_model, d_model)
+
+    def forward(self, hidden_states: torch.Tensor) -> dict:
+        """
+        Args:
+            hidden_states: (B, T, d_model) — sequence transformer outputs (excl. [CLS])
+        Returns:
+            dict with logits/predictions for each field
+        """
+        preds = {}
+        for name, head in self.cat_heads.items():
+            preds[f"cat_{name}"] = head(hidden_states)              # (B, T, vocab)
+        for name, head in self.num_heads.items():
+            preds[f"num_{name}"] = head(hidden_states).squeeze(-1)  # (B, T)
+        preds["full_recon"] = self.full_recon(hidden_states)        # (B, T, d_model)
+        return preds
+
+def mtm_loss(
+    preds: dict,
+    targets: dict,
+    mask: dict,
+    return_breakdown: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Combined MTM loss: cross-entropy for categoricals, smooth-L1 for numerics.
 
     Args:
         preds: dict from MTMHead.forward()
         targets: dict with ground-truth field values
         mask: dict with boolean masks (True = this position was masked)
+        return_breakdown: if True also return per-field detached losses
     Returns:
-        scalar loss
+        scalar loss, or (scalar, dict[name -> scalar]) when return_breakdown
     """
     total_loss = torch.tensor(0.0, device=next(iter(preds.values())).device)
     n_terms = 0
+    breakdown: dict[str, torch.Tensor] = {}
 
     # Categorical losses — driven by whatever cat_heads are present in preds
     for key in preds:
@@ -149,19 +166,47 @@ def mtm_loss(preds: dict, targets: dict, mask: dict) -> torch.Tensor:
         if name in mask and mask[name].any():
             logits = preds[key][mask[name]]        # (N_masked, vocab)
             target = targets[name][mask[name]]     # (N_masked,)
-            total_loss = total_loss + F.cross_entropy(logits, target)
+            l = F.cross_entropy(logits, target)
+            total_loss = total_loss + l
             n_terms += 1
+            breakdown[key] = l.detach()
 
-    # Numeric losses
-    for name in ["importo", "saldo_post", "delta_t"]:
-        key = f"num_{name}"
-        if key in preds and name in mask and mask[name].any():
+    # Numeric losses — driven by whatever num_heads are present in preds
+    for key in preds:
+        if not key.startswith("num_"):
+            continue
+        name = key[len("num_"):]
+        if name in mask and mask[name].any():
             pred_vals = preds[key][mask[name]]       # (N_masked,)
             target_vals = targets[name][mask[name]]  # (N_masked,)
-            total_loss = total_loss + F.smooth_l1_loss(pred_vals, target_vals)
+            l = F.smooth_l1_loss(pred_vals, target_vals)
+            total_loss = total_loss + l
             n_terms += 1
+            breakdown[key] = l.detach()
 
-    return total_loss / max(n_terms, 1)
+    total = total_loss / max(n_terms, 1)
+    if return_breakdown:
+        return total, breakdown
+    return total
+
+
+def info_nce_accuracy(z: torch.Tensor, client_ids: torch.Tensor) -> torch.Tensor:
+    """Top-1 retrieval accuracy: fraction of samples whose nearest neighbour
+    (excluding self) belongs to the same client.
+
+    Returns 0 when no positive pairs exist in the batch.
+    """
+    if z.size(0) < 2:
+        return torch.tensor(0.0, device=z.device)
+    sim = z @ z.t()
+    sim.fill_diagonal_(float("-inf"))
+    nn_idx = sim.argmax(dim=1)
+    correct = (client_ids[nn_idx] == client_ids).float()
+    # Mask out rows that have no positive in batch (otherwise correct=False is unfair)
+    pos_exists = (client_ids.unsqueeze(0) == client_ids.unsqueeze(1)).fill_diagonal_(False).any(dim=1)
+    if not pos_exists.any():
+        return torch.tensor(0.0, device=z.device)
+    return (correct * pos_exists.float()).sum() / pos_exists.float().sum()
 
 
 def combined_pretrain_loss(
@@ -175,7 +220,9 @@ def combined_pretrain_loss(
 
     Returns dict with individual losses for logging.
     """
-    l_mtm = mtm_loss(output["mtm_preds"], targets, mtm_mask)
+    l_mtm, mtm_breakdown = mtm_loss(
+        output["mtm_preds"], targets, mtm_mask, return_breakdown=True,
+    )
     l_contrastive = info_nce_loss(
         output["contrastive_z"],
         client_ids,
@@ -187,4 +234,5 @@ def combined_pretrain_loss(
         "loss": total,
         "loss_mtm": l_mtm.detach(),
         "loss_contrastive": l_contrastive.detach(),
+        "mtm_breakdown": mtm_breakdown,
     }

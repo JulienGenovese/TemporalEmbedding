@@ -6,9 +6,9 @@ import torch.nn as nn
 from .encoder import (
     TransactionEncoder,
     NumericFeature, CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
-    FeatureSpec, categorical_vocab_sizes,
+    FeatureSpec, categorical_vocab_sizes, numeric_field_names,
 )
-from .field_encoder import FieldTransformer
+from .field_transformer import FieldTransformer
 from .sequence_encoder import SequenceTransformer
 from .loss import MTMHead, ContrastiveHead
 
@@ -79,7 +79,11 @@ class TransactionTransformer(nn.Module):
         # --- Pre-training heads (removable) ---
         self.pretrain = pretrain
         if pretrain:
-            self.mtm_head = MTMHead(d_model, vocab_sizes=categorical_vocab_sizes(features))
+            self.mtm_head = MTMHead(
+                d_model,
+                vocab_sizes=categorical_vocab_sizes(features),
+                numeric_names=numeric_field_names(features),
+            )
             self.contrastive_head = ContrastiveHead(d_model)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

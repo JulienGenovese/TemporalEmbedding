@@ -26,8 +26,10 @@ class Vocabulary:
 
     def fit(self, values) -> Vocabulary:
         unique = sorted(set(int(v) for v in values if int(v) != 0))
+        # indice da 1 a + inf
         self._val2idx = {v: i + 1 for i, v in enumerate(unique)}
         if unique:
+            # crea tensore di dimensioni max(unique) + 1
             lookup = torch.zeros(max(unique) + 1, dtype=torch.long)
             for v, idx in self._val2idx.items():
                 lookup[v] = idx
@@ -43,6 +45,7 @@ class Vocabulary:
     def __call__(self, ids: torch.Tensor) -> torch.Tensor:
         if self._lookup is None:
             raise RuntimeError("Vocabulary not fitted — call fit() first")
+        # il clamp serve per mettere i valori fuori dalla lookup a 0
         return self._lookup.to(ids.device)[ids.long().clamp(max=len(self._lookup) - 1)]
 
 
@@ -267,12 +270,15 @@ class DatetimeFeature(FeatureSpecProtocol):
 class HighCardCategoricalFeature(FeatureSpecProtocol):
     """High-cardinality field via double hashing.
 
-    Accepts raw integer IDs in ``batch[name]`` and computes two independent
+    Accepts raw values (strings or integers) and computes two independent
     hash buckets internally (Knuth multiplicative hashing with different primes).
-    Padding (ID == 0) is preserved as bucket 0.
+    Padding (ID == 0 or empty string / None) is preserved as bucket 0.
+
+    Use ``prepare(raw_values)`` to convert a (B, T) nested list of strings
+    or ints into an integer tensor suitable for the batch dict.
     """
     name: str
-    hash_buckets: int = 8192
+    hash_buckets: int = 5003
 
     @property
     def n_slots(self) -> int:
@@ -283,6 +289,36 @@ class HighCardCategoricalFeature(FeatureSpecProtocol):
             nn.Embedding(self.hash_buckets, d_field, padding_idx=0),
             nn.Embedding(self.hash_buckets, d_field, padding_idx=0),
         ])
+
+    @staticmethod
+    def _fnv1a_64(s: str) -> int:
+        """Deterministic FNV-1a hash for strings, fits in a signed int64."""
+        h = 0xcbf29ce484222325
+        for b in s.encode("utf-8"):
+            h = ((h ^ b) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+        h = h & 0x7FFFFFFFFFFFFFFF
+        return h if h != 0 else 1
+
+    @staticmethod
+    def _to_int(value) -> int:
+        """Convert a raw value to a deterministic integer.
+
+        Strings are hashed via FNV-1a 64-bit; ints pass through unchanged.
+        Zero / empty / None → 0 (padding).
+        """
+        if value is None or value == "" or value == 0:
+            return 0
+        if isinstance(value, str):
+            return HighCardCategoricalFeature._fnv1a_64(value)
+        return int(value)
+
+    @classmethod
+    def prepare(cls, values) -> torch.Tensor:
+        """Convert a (B, T) nested list of raw values (strings or ints) to a long tensor."""
+        return torch.tensor(
+            [[cls._to_int(v) for v in row] for row in values],
+            dtype=torch.long,
+        )
 
     @staticmethod
     def _double_hash(ids: torch.Tensor, n_buckets: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -303,6 +339,11 @@ FeatureSpec = NumericFeature | CategoricalFeature | DatetimeFeature | HighCardCa
 def categorical_vocab_sizes(features: list[FeatureSpec]) -> dict[str, int]:
     """Return ``{name: vocab_size}`` for every CategoricalFeature in the schema."""
     return {f.name: f.vocab_size for f in features if isinstance(f, CategoricalFeature)}
+
+
+def numeric_field_names(features: list[FeatureSpec]) -> list[str]:
+    """Return the names of every NumericFeature in the schema."""
+    return [f.name for f in features if isinstance(f, NumericFeature)]
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +425,10 @@ if __name__ == "__main__":
                                      1_583_020_800,   # 2020-03-01
                                      1_614_556_800,   # 2021-03-01
                                      0]]),
-        "merchant":   torch.tensor([[ 42, 113,  7,  0],
-                                    [  7,  42, 999, 0]]),
+        "merchant":   HighCardCategoricalFeature.prepare([
+                          ["Amazon",  "Walmart", "Starbucks", ""],
+                          ["Starbucks", "Amazon", "Target",   ""],
+                      ]),
     }
     for key, value in batch.items():
         print(key, ": ", value)

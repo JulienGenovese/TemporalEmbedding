@@ -86,7 +86,7 @@ class FieldTransformer(nn.Module):
         # Reshape to process all transactions in parallel: (B*T, F, d_model)
         x = x.reshape(B * T, F, self.d_model)
 
-        # Transformer encoder (F=13 is tiny, no need for Flash Attention here)
+        # Transformer encoder
         x = self.encoder(x)  # (B*T, F, d_model)
 
         # Attention pooling over fields
