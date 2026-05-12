@@ -12,3 +12,4 @@ wheels/
 # Generated artifacts
 data/
 checkpoints/
+notebooks/*
