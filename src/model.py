@@ -16,18 +16,7 @@ from .loss import MTMHead, ContrastiveHead
 # Default feature schema matching the original 13-field design:
 #   importo(signed) → 2, saldo_post → 1, delta_t → 1, merchant(hash) → 1,
 #   mcc/canale/macro_tipo/sotto_tipo/divisa → 5, timestamp → 3   total = 13
-DEFAULT_FEATURES: list[FeatureSpec] = [
-    NumericFeature("importo", signed=True),
-    NumericFeature("saldo_post"),
-    NumericFeature("delta_t"),
-    HighCardCategoricalFeature("merchant"),
-    CategoricalFeature("mcc",        801),
-    CategoricalFeature("canale",      11),
-    CategoricalFeature("macro_tipo",   9),
-    CategoricalFeature("sotto_tipo",  41),
-    CategoricalFeature("divisa",       6),
-    DatetimeFeature("timestamp"),
-]
+
 
 
 class TransactionTransformer(nn.Module):
@@ -41,7 +30,7 @@ class TransactionTransformer(nn.Module):
 
     def __init__(
         self,
-        features: list[FeatureSpec] = DEFAULT_FEATURES,
+        features: list[FeatureSpec] = None,
         d_field: int = 64,
         d_model: int = 128,
         n_frequencies: int = 16,
@@ -54,6 +43,7 @@ class TransactionTransformer(nn.Module):
         use_gradient_checkpointing: bool = True,
         pretrain: bool = True,
     ):
+        assert features is not None, "'features' can't be None"
         super().__init__()
 
         # --- Backbone ---
@@ -153,7 +143,18 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-
+    DEFAULT_FEATURES: list[FeatureSpec] = [
+        NumericFeature("importo", signed=True),
+        NumericFeature("saldo_post"),
+        NumericFeature("delta_t"),
+        HighCardCategoricalFeature("merchant"),
+        CategoricalFeature("mcc",        801),
+        CategoricalFeature("canale",      11),
+        CategoricalFeature("macro_tipo",   9),
+        CategoricalFeature("sotto_tipo",  41),
+        CategoricalFeature("divisa",       6),
+        DatetimeFeature("timestamp"),
+    ]
     # Instantiate model
     model = TransactionTransformer(pretrain=True).to(device)
 

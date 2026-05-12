@@ -41,7 +41,8 @@ def build_mtm_targets(
     features: list[FeatureSpec],
     mask_prob: float,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Copy original values as targets, build per-field boolean masks.
+    """Copy original values as targets, build per-field boolean masks, and
+    zero out masked positions in ``batch`` so the encoder cannot see them.
 
     Padded positions are never masked.  Hash and datetime fields are not MTM
     targets (consistent with :class:`MTMHead`).
@@ -60,8 +61,49 @@ def build_mtm_targets(
         if pad_mask is not None:
             m = m & ~pad_mask
         masks[name] = m
+        batch[name] = batch[name].masked_fill(m, 0)
 
     return targets, masks
+
+
+# ---------------------------------------------------------------------------
+# Dataset / loader construction
+# ---------------------------------------------------------------------------
+
+def build_dataloader(
+    csv_path: str | Path,
+    *,
+    seq_len: int,
+    windows_per_client: int,
+    clients_per_batch: int,
+    windows_per_pair: int,
+    seed: int,
+) -> tuple[DataLoader, list[FeatureSpec]]:
+    """Load the CSV, fit per-feature normalizers, and build the paired loader."""
+    df = load_dataframe(csv_path)
+    features = fit_features(df, DEFAULT_FEATURES)
+    dataset = TransactionDataset(
+        df,
+        client_col="client_id",
+        timestamp_col="timestamp",
+        feature_cols=[
+            "importo", "saldo_post", "merchant", "mcc",
+            "canale", "macro_tipo", "sotto_tipo", "divisa",
+        ],
+        seq_len=seq_len,
+        windows_per_client=windows_per_client,
+        seed=seed,
+    )
+    sampler = PairedClientBatchSampler(
+        dataset,
+        clients_per_batch=clients_per_batch,
+        windows_per_pair=windows_per_pair,
+        seed=seed,
+    )
+    loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate)
+    print(f"Rows: {len(df):,}  clients: {df['client_id'].nunique()}")
+    print(f"Batches/epoch: {len(sampler)}  batch size: {clients_per_batch * windows_per_pair}")
+    return loader, features
 
 
 # ---------------------------------------------------------------------------
@@ -69,13 +111,10 @@ def build_mtm_targets(
 # ---------------------------------------------------------------------------
 
 def train(
+    loader: DataLoader,
+    features: list[FeatureSpec],
     *,
-    csv_path: str | Path = Path("data") / "transactions.csv",
     epochs: int = 2,
-    seq_len: int = 32,
-    windows_per_client: int = 4,
-    clients_per_batch: int = 8,
-    windows_per_pair: int = 2,
     mask_prob: float = 0.15,
     contrastive_weight: float = 0.5,
     lr: float = 3e-4,
@@ -85,27 +124,12 @@ def train(
     device: str | None = None,
     seed: int = 0,
 ) -> Path:
-    """Run pre-training on the CSV dataset and save a final checkpoint."""
+    """Run pre-training on the given loader and save a final checkpoint."""
     torch.manual_seed(seed)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     ckpt_dir = Path(ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Data ---
-    df = load_dataframe(csv_path)
-    features = fit_features(df, DEFAULT_FEATURES)
-    dataset = TransactionDataset(
-        df, seq_len=seq_len, windows_per_client=windows_per_client, seed=seed,
-    )
-    sampler = PairedClientBatchSampler(
-        dataset,
-        clients_per_batch=clients_per_batch,
-        windows_per_pair=windows_per_pair,
-        seed=seed,
-    )
-    loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate)
-
-    # --- Model ---
     on_cpu = device == "cpu"
     model = TransactionTransformer(
         features=features,
@@ -116,8 +140,6 @@ def train(
 
     print(f"Device: {device}")
     print(f"Params: {count_parameters(model)['total']:,}")
-    print(f"Rows: {len(df):,}  clients: {df['client_id'].nunique()}")
-    print(f"Batches/epoch: {len(sampler)}  batch size: {clients_per_batch * windows_per_pair}")
 
     model.train()
     step = 0
@@ -186,4 +208,13 @@ def train(
 
 
 if __name__ == "__main__":
-    train()
+    SEED = 0
+    loader, features = build_dataloader(
+        Path("data") / "transactions.csv",
+        seq_len=32,
+        windows_per_client=4,
+        clients_per_batch=8,
+        windows_per_pair=2,
+        seed=SEED,
+    )
+    train(loader, features, seed=SEED)

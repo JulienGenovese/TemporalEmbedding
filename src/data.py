@@ -58,7 +58,7 @@ def fit_features(df: pd.DataFrame, features: list[FeatureSpec]) -> list[FeatureS
 # ---------------------------------------------------------------------------
 
 class TransactionDataset(Dataset):
-    """Per-client windowed view over the synthetic transactions CSV.
+    """Per-client windowed view over the transactions datafile.
 
     Each ``__getitem__`` returns a single fixed-length window (``seq_len``
     transactions) drawn from a single client.  Sequences shorter than
@@ -68,33 +68,55 @@ class TransactionDataset(Dataset):
     def __init__(
         self,
         df: pd.DataFrame,
+        client_col: str,
+        timestamp_col: str,
+        feature_cols: list[str],
         seq_len: int = 32,
         windows_per_client: int = 4,
         seed: int = 0,
     ):
-        self.seq_len = seq_len
-        self.windows_per_client = windows_per_client
+        self.client_col = client_col
+        self.timestamp_col = timestamp_col
+        self.feature_cols = list(feature_cols)
+        self.seq_len = seq_len # quante transazioni per finestra
+        self.windows_per_client = windows_per_client # quante finestre per ogni cliente
         self._rng = np.random.default_rng(seed)
+
+        # Resolve per-feature numpy dtype from the source DataFrame.
+        # float -> float32, integer -> int64, object/string -> int64 (FNV-1a hashed).
+        self._col_dtypes: dict[str, type] = {}
+        self._col_is_string: dict[str, bool] = {}
+        for col in self.feature_cols:
+            s = df[col]
+            if pd.api.types.is_float_dtype(s):
+                self._col_dtypes[col] = np.float32
+                self._col_is_string[col] = False
+            elif pd.api.types.is_integer_dtype(s):
+                self._col_dtypes[col] = np.int64
+                self._col_is_string[col] = False
+            elif pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+                self._col_dtypes[col] = np.int64
+                self._col_is_string[col] = True
+            else:
+                raise TypeError(f"Unsupported dtype for column '{col}': {s.dtype}")
 
         # Pre-compute per-client field arrays once
         self.clients: list[dict[str, np.ndarray | int]] = []
-        for cid, g in df.sort_values(["client_id", "timestamp"]).groupby("client_id"):
-            self.clients.append({
-                "client_id":  int(cid),
-                "n":          len(g),
-                "timestamp":  g["timestamp"].to_numpy(np.int64),
-                "importo":    g["importo"].to_numpy(np.float32),
-                "saldo_post": g["saldo_post"].to_numpy(np.float32),
-                "merchant":   np.array(
-                    [HighCardCategoricalFeature._to_int(m) for m in g["merchant"]],
-                    dtype=np.int64,
-                ),
-                "mcc":        g["mcc"].to_numpy(np.int64),
-                "canale":     g["canale"].to_numpy(np.int64),
-                "macro_tipo": g["macro_tipo"].to_numpy(np.int64),
-                "sotto_tipo": g["sotto_tipo"].to_numpy(np.int64),
-                "divisa":     g["divisa"].to_numpy(np.int64),
-            })
+        for cid, g in df.sort_values([client_col, timestamp_col]).groupby(client_col):
+            entry: dict[str, np.ndarray | int] = {
+                "client_id": int(cid),
+                "n":         len(g),
+                "timestamp": g[timestamp_col].to_numpy(np.int64),
+            }
+            for col in self.feature_cols:
+                if self._col_is_string[col]:
+                    entry[col] = np.array(
+                        [HighCardCategoricalFeature._to_int(v) for v in g[col]],
+                        dtype=np.int64,
+                    )
+                else:
+                    entry[col] = g[col].to_numpy(self._col_dtypes[col])
+            self.clients.append(entry)
 
         # Flat index: (client_idx, _) — start position is sampled at fetch time
         self._index: list[int] = [
@@ -125,21 +147,19 @@ class TransactionDataset(Dataset):
             delta_t[1:] = np.clip(np.diff(ts).astype(np.float32), 0, None)
 
         sample: dict[str, torch.Tensor] = {
-            "importo":      _pad_float(c["importo"][start:end],    pad),
-            "saldo_post":   _pad_float(c["saldo_post"][start:end], pad),
-            "delta_t":      _pad_float(delta_t,                    pad),
-            "merchant":     _pad_long (c["merchant"][start:end],   pad),
-            "mcc":          _pad_long (c["mcc"][start:end],        pad),
-            "canale":       _pad_long (c["canale"][start:end],     pad),
-            "macro_tipo":   _pad_long (c["macro_tipo"][start:end], pad),
-            "sotto_tipo":   _pad_long (c["sotto_tipo"][start:end], pad),
-            "divisa":       _pad_long (c["divisa"][start:end],     pad),
-            "timestamp":    _pad_long (ts,                         pad),
-            "padding_mask": torch.cat([
-                torch.zeros(length, dtype=torch.bool),
-                torch.ones(pad,    dtype=torch.bool),
-            ]),
+            "delta_t":   _pad_float(delta_t, pad),
+            "timestamp": _pad_long(ts, pad),
         }
+        for col in self.feature_cols:
+            arr = c[col][start:end]
+            if self._col_dtypes[col] == np.float32:
+                sample[col] = _pad_float(arr, pad)
+            else:
+                sample[col] = _pad_long(arr, pad)
+        sample["padding_mask"] = torch.cat([
+            torch.zeros(length, dtype=torch.bool),
+            torch.ones(pad,    dtype=torch.bool),
+        ])
         return sample, int(c["client_id"])
 
 
@@ -198,7 +218,9 @@ class PairedClientBatchSampler(Sampler[list[int]]):
             batch: list[int] = []
             for ci in chunk:
                 picks = self._rng.choice(
-                    self._by_client[ci], size=self.windows_per_pair, replace=False,
+                    self._by_client[ci], 
+                    size=self.windows_per_pair, 
+                    replace=False, # finestre DISTINTE
                 )
                 batch.extend(int(p) for p in picks)
             yield batch
@@ -224,12 +246,35 @@ def collate(items: list[tuple[dict[str, torch.Tensor], int]]):
 # ---------------------------------------------------------------------------
 
 def load_dataframe(path: Path | str = Path("data") / "transactions.csv") -> pd.DataFrame:
+    """Load transactions from a CSV/parquet file or a folder of either type.
+
+    - File ``*.csv`` → :func:`pandas.read_csv`
+    - File ``*.parquet`` → :func:`pandas.read_parquet`
+    - Folder → all top-level ``*.csv`` are concatenated, or all ``*.parquet``
+      are read together via :func:`pandas.read_parquet` (which natively handles
+      a directory of parquet parts).  Mixing both extensions in the same folder
+      is rejected.
+    """
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(
-            f"{path} not found — run `uv run python -m src.make_dataset` first."
-        )
-    return pd.read_csv(path)
+        raise FileNotFoundError(f"{path} not found")
+
+    if path.is_dir():
+        parquets = sorted(path.glob("*.parquet"))
+        csvs = sorted(path.glob("*.csv"))
+        if parquets and csvs:
+            raise ValueError(f"{path} contains both .parquet and .csv files")
+        if parquets:
+            return pd.read_parquet(path)
+        if csvs:
+            return pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
+        raise FileNotFoundError(f"No .csv or .parquet files in {path}")
+
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    if path.suffix == ".csv":
+        return pd.read_csv(path)
+    raise ValueError(f"Unsupported file extension: {path.suffix} ({path})")
 
 
 # ---------------------------------------------------------------------------
@@ -239,13 +284,36 @@ def load_dataframe(path: Path | str = Path("data") / "transactions.csv") -> pd.D
 if __name__ == "__main__":
     from torch.utils.data import DataLoader
 
-    from .model import DEFAULT_FEATURES
+    DEFAULT_FEATURES: list[FeatureSpec] = [
+        NumericFeature("importo", signed=True),
+        NumericFeature("saldo_post"),
+        NumericFeature("delta_t"),
+        HighCardCategoricalFeature("merchant"),
+        CategoricalFeature("mcc",        801),
+        CategoricalFeature("canale",      11),
+        CategoricalFeature("macro_tipo",   9),
+        CategoricalFeature("sotto_tipo",  41),
+        CategoricalFeature("divisa",       6),
+        DatetimeFeature("timestamp"),
+    ]
 
     df = load_dataframe()
     features = fit_features(df, DEFAULT_FEATURES)
-    ds = TransactionDataset(df, seq_len=32, windows_per_client=4)
+    ds = TransactionDataset(
+        df,
+        client_col="client_id",
+        timestamp_col="timestamp",
+        feature_cols=[
+            "importo", "saldo_post", "merchant", "mcc",
+            "canale", "macro_tipo", "sotto_tipo", "divisa",
+        ],
+        seq_len=32,
+        windows_per_client=4,
+    )
     sampler = PairedClientBatchSampler(ds, clients_per_batch=8, windows_per_pair=2)
-    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=collate)
+    loader = DataLoader(ds, 
+                        batch_sampler=sampler, 
+                        collate_fn=collate)
 
     batch, client_ids = next(iter(loader))
     print(f"batch size = {client_ids.size(0)}  unique clients = {client_ids.unique().numel()}")
