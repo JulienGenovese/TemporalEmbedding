@@ -136,6 +136,20 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+DEFAULT_FEATURES: list[FeatureSpec] = [
+    NumericFeature("importo", signed=True),
+    NumericFeature("saldo_post"),
+    NumericFeature("delta_t"),
+    HighCardCategoricalFeature("merchant"),
+    CategoricalFeature("mcc",        801),
+    CategoricalFeature("canale",      11),
+    CategoricalFeature("macro_tipo",   9),
+    CategoricalFeature("sotto_tipo",  41),
+    CategoricalFeature("divisa",       6),
+    DatetimeFeature("timestamp"),
+]
+
+
 # ---------------------------------------------------------------------------
 # Quick test
 # ---------------------------------------------------------------------------
@@ -143,18 +157,6 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
-    DEFAULT_FEATURES: list[FeatureSpec] = [
-        NumericFeature("importo", signed=True),
-        NumericFeature("saldo_post"),
-        NumericFeature("delta_t"),
-        HighCardCategoricalFeature("merchant"),
-        CategoricalFeature("mcc",        801),
-        CategoricalFeature("canale",      11),
-        CategoricalFeature("macro_tipo",   9),
-        CategoricalFeature("sotto_tipo",  41),
-        CategoricalFeature("divisa",       6),
-        DatetimeFeature("timestamp"),
-    ]
     # Instantiate model
     model = TransactionTransformer(pretrain=True).to(device)
 

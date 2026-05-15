@@ -207,6 +207,20 @@ class PairedClientBatchSampler(Sampler[list[int]]):
         for di, ci in enumerate(dataset._index):
             self._by_client.setdefault(ci, []).append(di)
 
+        # Escludi clienti con troppo poche transazioni per produrre
+        # `windows_per_pair` finestre con contenuto distinto.
+        # Start ∈ [0, n - seq_len] → start distinti = max(1, n - seq_len + 1).
+        min_transactions = dataset.seq_len + windows_per_pair - 1
+        self._by_client = {
+            ci: idxs for ci, idxs in self._by_client.items()
+            if int(dataset.clients[ci]["n"]) >= min_transactions
+        }
+        if not self._by_client:
+            raise ValueError(
+                f"No clients have ≥{min_transactions} transactions "
+                f"(seq_len={dataset.seq_len}, windows_per_pair={windows_per_pair})"
+            )
+
     def __iter__(self):
         client_ids = list(self._by_client.keys())
         self._rng.shuffle(client_ids)

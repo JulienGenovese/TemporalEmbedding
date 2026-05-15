@@ -3,8 +3,9 @@ End-to-end pre-training of TransactionTransformer on a synthetic CSV dataset.
 
 Reads ``data/transactions.csv`` (produced by :mod:`src.make_dataset`),
 fits per-feature normalizers/vocabularies, and runs the joint
-MTM + InfoNCE objective.  Default hyper-parameters are sized for a
-CPU smoke test (~3-5 min on a laptop).
+MTM + InfoNCE objective.  Default hyper-parameters (see
+:class:`src.config.TrainingArgs`) are sized for a CPU smoke test
+(~3-5 min on a laptop).
 
 Usage:
     uv run python -m src.make_dataset    # one-off
@@ -18,8 +19,10 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from loguru import logger
 from torch.utils.data import DataLoader
 
+from .config import TrainingArgs
 from .data import (
     PairedClientBatchSampler, TransactionDataset,
     collate, fit_features, load_dataframe,
@@ -70,18 +73,26 @@ def build_mtm_targets(
 # Dataset / loader construction
 # ---------------------------------------------------------------------------
 
-def build_dataloader(
-    csv_path: str | Path,
-    *,
-    seq_len: int,
-    windows_per_client: int,
-    clients_per_batch: int,
-    windows_per_pair: int,
-    seed: int,
-) -> tuple[DataLoader, list[FeatureSpec]]:
+def build_dataloader(args: TrainingArgs) -> tuple[DataLoader, list[FeatureSpec]]:
     """Load the CSV, fit per-feature normalizers, and build the paired loader."""
-    df = load_dataframe(csv_path)
+    logger.info("Loading dataframe from {}", args.csv_path)
+    df = load_dataframe(args.csv_path)
+    logger.info(
+        "Loaded {:,} rows / {} clients",
+        len(df), df["client_id"].nunique(),
+    )
+
+    logger.info("Fitting per-feature normalizers/vocabularies")
     features = fit_features(df, DEFAULT_FEATURES)
+    logger.debug(
+        "Feature schema: {}",
+        [(f.__class__.__name__, f.name) for f in features],
+    )
+
+    logger.info(
+        "Building TransactionDataset (seq_len={}, windows_per_client={})",
+        args.seq_len, args.windows_per_client,
+    )
     dataset = TransactionDataset(
         df,
         client_col="client_id",
@@ -90,19 +101,25 @@ def build_dataloader(
             "importo", "saldo_post", "merchant", "mcc",
             "canale", "macro_tipo", "sotto_tipo", "divisa",
         ],
-        seq_len=seq_len,
-        windows_per_client=windows_per_client,
-        seed=seed,
+        seq_len=args.seq_len,
+        windows_per_client=args.windows_per_client,
+        seed=args.seed,
     )
+    logger.info("Dataset built: {:,} windows total", len(dataset))
+
     sampler = PairedClientBatchSampler(
         dataset,
-        clients_per_batch=clients_per_batch,
-        windows_per_pair=windows_per_pair,
-        seed=seed,
+        clients_per_batch=args.clients_per_batch,
+        windows_per_pair=args.windows_per_pair,
+        seed=args.seed,
     )
     loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate)
-    print(f"Rows: {len(df):,}  clients: {df['client_id'].nunique()}")
-    print(f"Batches/epoch: {len(sampler)}  batch size: {clients_per_batch * windows_per_pair}")
+    logger.info(
+        "Loader ready: {} batches/epoch, batch size {} "
+        "({} clients × {} windows)",
+        len(sampler), args.batch_size,
+        args.clients_per_batch, args.windows_per_pair,
+    )
     return loader, features
 
 
@@ -113,56 +130,64 @@ def build_dataloader(
 def train(
     loader: DataLoader,
     features: list[FeatureSpec],
-    *,
-    epochs: int = 2,
-    mask_prob: float = 0.15,
-    contrastive_weight: float = 0.5,
-    lr: float = 3e-4,
-    grad_clip: float = 1.0,
-    log_every: int = 5,
-    ckpt_dir: str | Path = "checkpoints",
-    device: str | None = None,
-    seed: int = 0,
+    args: TrainingArgs,
 ) -> Path:
     """Run pre-training on the given loader and save a final checkpoint."""
-    torch.manual_seed(seed)
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt_dir = Path(ckpt_dir)
+    torch.manual_seed(args.seed)
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("Device is : {}", device)
+    ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Checkpoint directory: {}", ckpt_dir.resolve())
 
     on_cpu = device == "cpu"
+    use_ckpt = not on_cpu
+    logger.info(
+        "Building TransactionTransformer (device={}, gradient_checkpointing={})",
+        device, use_ckpt,
+    )
     model = TransactionTransformer(
         features=features,
         pretrain=True,
-        use_gradient_checkpointing=not on_cpu,  # checkpointing slows CPU down
+        use_gradient_checkpointing=use_ckpt,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
 
-    print(f"Device: {device}")
-    print(f"Params: {count_parameters(model)['total']:,}")
+    param_stats = count_parameters(model)
+    logger.info("Model parameters: {:,} total", param_stats["total"])
+    logger.debug("Parameter breakdown: {}", param_stats)
+    logger.info(
+        "Optimizer: AdamW(lr={}), grad_clip={}, mask_prob={}, "
+        "contrastive_weight={}",
+        args.lr, args.grad_clip, args.mask_prob, args.contrastive_weight,
+    )
 
     model.train()
     step = 0
     history: list[dict] = []
     final_path = ckpt_dir / "model_final.pt"
     history_path = ckpt_dir / "history.json"
-    for epoch in range(1, epochs + 1):
+
+    logger.info("Starting training: {} epoch(s)", args.epochs)
+    for epoch in range(1, args.epochs + 1):
+        logger.info("=== Epoch {}/{} ===", epoch, args.epochs)
+        epoch_losses: list[float] = []
         for batch, client_ids in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             client_ids = client_ids.to(device)
 
-            targets, mtm_mask = build_mtm_targets(batch, features, mask_prob)
+            targets, mtm_mask = build_mtm_targets(batch, features, args.mask_prob)
 
             optimizer.zero_grad(set_to_none=True)
             output = model(batch)
             output["temperature"] = model.contrastive_head.temperature
 
             losses = combined_pretrain_loss(
-                output, targets, mtm_mask, client_ids, contrastive_weight,
+                output, targets, mtm_mask, client_ids, args.contrastive_weight,
             )
             loss = losses["loss"]
             loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
 
             with torch.no_grad():
@@ -183,16 +208,25 @@ def train(
                 },
             }
             history.append(entry)
+            epoch_losses.append(entry["loss"])
 
-            if step % log_every == 0 or step == 1:
-                print(
-                    f"epoch {epoch} step {step:>4} | loss={loss.item():.4f} "
-                    f"mtm={losses['loss_mtm'].item():.4f} "
-                    f"con={losses['loss_contrastive'].item():.4f} "
-                    f"acc={acc.item():.3f} "
-                    f"|g|={grad_norm.item():.2f}"
+            if step % args.log_every == 0 or step == 1:
+                logger.info(
+                    "epoch {} step {:>4} | loss={:.4f} mtm={:.4f} con={:.4f} "
+                    "acc={:.3f} |g|={:.2f}",
+                    epoch, step, loss.item(),
+                    losses["loss_mtm"].item(), losses["loss_contrastive"].item(),
+                    acc.item(), grad_norm.item(),
                 )
 
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        logger.info(
+            "Epoch {} done — avg loss={:.4f} over {} steps",
+            epoch, avg_loss, len(epoch_losses),
+        )
+
+    logger.info("Training complete after {} steps", step)
+    logger.info("Saving final checkpoint → {}", final_path)
     torch.save(
         {
             "step": step,
@@ -201,20 +235,14 @@ def train(
         },
         final_path,
     )
+    logger.info("Saving history → {}", history_path)
     history_path.write_text(json.dumps(history, indent=2))
-    print(f"\nFinal model saved → {final_path}")
-    print(f"History saved      → {history_path}")
+    logger.success("All artifacts written under {}", ckpt_dir.resolve())
     return final_path
 
 
 if __name__ == "__main__":
-    SEED = 0
-    loader, features = build_dataloader(
-        Path("data") / "transactions.csv",
-        seq_len=32,
-        windows_per_client=4,
-        clients_per_batch=8,
-        windows_per_pair=2,
-        seed=SEED,
-    )
-    train(loader, features, seed=SEED)
+    args = TrainingArgs()
+    logger.info("TrainingArgs: {}", args)
+    loader, features = build_dataloader(args)
+    train(loader, features, args)
