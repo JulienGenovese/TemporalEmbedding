@@ -236,3 +236,27 @@ def combined_pretrain_loss(
         "loss_contrastive": l_contrastive.detach(),
         "mtm_breakdown": mtm_breakdown,
     }
+
+
+class PretrainLoss(nn.Module):
+    """Callable wrapper around :func:`combined_pretrain_loss`.
+
+    Holds the contrastive weight so the training loop can treat the loss
+    as a regular ``nn.Module`` (movable to device, registrable inside a
+    larger module, callable via ``loss(output, targets, mask, ids)``).
+    """
+
+    def __init__(self, contrastive_weight: float = 0.5):
+        super().__init__()
+        self.contrastive_weight = contrastive_weight
+
+    def forward(
+        self,
+        output: dict[str, torch.Tensor],
+        targets: dict[str, torch.Tensor],
+        mtm_mask: dict[str, torch.Tensor],
+        client_ids: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return combined_pretrain_loss(
+            output, targets, mtm_mask, client_ids, self.contrastive_weight,
+        )

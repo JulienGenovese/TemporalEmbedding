@@ -136,17 +136,64 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
     return counts
 
 
+class EmbeddingModel(nn.Module):
+    """High-level wrapper around :class:`TransactionTransformer`.
+
+    Adds production-friendly helpers (``embed`` for inference, ``save``/
+    ``load`` for checkpoint round-trip) while keeping the underlying
+    backbone fully accessible via ``self.backbone``.
+    """
+
+    def __init__(self, features: list[FeatureSpec], **kwargs):
+        super().__init__()
+        self.features = features
+        self.backbone = TransactionTransformer(features=features, **kwargs)
+        self._init_kwargs = kwargs  # remembered for ``load``
+
+    def forward(self, batch: dict[str, "torch.Tensor"]) -> dict[str, "torch.Tensor"]:
+        return self.backbone(batch)
+
+    def embed(self, batch: dict[str, "torch.Tensor"]) -> "torch.Tensor":
+        """Inference-only: return the (B, d_model) client embedding."""
+        return self.backbone.get_client_embedding(batch)
+
+    def save(
+        self,
+        path,
+        optimizer_state: dict | None = None,
+        step: int | None = None,
+    ) -> None:
+        payload: dict = {"model_state": self.state_dict()}
+        if optimizer_state is not None:
+            payload["optimizer_state"] = optimizer_state
+        if step is not None:
+            payload["step"] = step
+        torch.save(payload, path)
+
+    @classmethod
+    def load(
+        cls,
+        path,
+        features: list[FeatureSpec],
+        map_location: str | None = None,
+        strict: bool = True,
+        **kwargs,
+    ) -> "EmbeddingModel":
+        state = torch.load(path, map_location=map_location, weights_only=False)
+        model = cls(features=features, **kwargs)
+        model.load_state_dict(state["model_state"], strict=strict)
+        return model
+
+
 DEFAULT_FEATURES: list[FeatureSpec] = [
     NumericFeature("importo", signed=True),
     NumericFeature("saldo_post"),
-    NumericFeature("delta_t"),
     HighCardCategoricalFeature("merchant"),
     CategoricalFeature("mcc",        801),
     CategoricalFeature("canale",      11),
     CategoricalFeature("macro_tipo",   9),
     CategoricalFeature("sotto_tipo",  41),
     CategoricalFeature("divisa",       6),
-    DatetimeFeature("timestamp"),
 ]
 
 

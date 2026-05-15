@@ -11,46 +11,22 @@ pairs for the InfoNCE contrastive head.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, Sampler
+from loguru import logger
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .encoder import (
-    CategoricalFeature, DatetimeFeature, FeatureSpec,
-    HighCardCategoricalFeature, NumericFeature,
+    FeatureSpec, HighCardCategoricalFeature, NumericFeature,
 )
 
+from .config import FEATURE_COLS, DataConfig
 
-# ---------------------------------------------------------------------------
-# Feature fitting on the loaded DataFrame
-# ---------------------------------------------------------------------------
-
-def fit_features(df: pd.DataFrame, features: list[FeatureSpec]) -> list[FeatureSpec]:
-    """Fit per-feature normalizers/vocabularies from the training DataFrame.
-
-    Numeric features get a clip+log1p+z-score normalizer.  Categorical
-    features keep their explicit ``vocab_size`` (synthetic data is generated
-    inside that range).  ``delta_t`` is fitted from the inter-transaction
-    gaps computed per client.
-    """
-    delta_t_values = (
-        df.sort_values(["client_id", "timestamp"])
-          .groupby("client_id")["timestamp"]
-          .diff()
-          .dropna()
-          .clip(lower=0)
-          .to_numpy()
-    )
-
-    for feat in features:
-        if isinstance(feat, NumericFeature):
-            if feat.name == "delta_t":
-                feat.fit(delta_t_values)
-            elif feat.name in df.columns:
-                feat.fit(df[feat.name].to_numpy())
-    return features
+if TYPE_CHECKING:
+    from .config import TrainingArgs
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +82,7 @@ class TransactionDataset(Dataset):
             entry: dict[str, np.ndarray | int] = {
                 "client_id": int(cid),
                 "n":         len(g),
-                "timestamp": g[timestamp_col].to_numpy(np.int64),
+                "timestamp": g[timestamp_col].to_numpy(np.int64, copy=True),
             }
             for col in self.feature_cols:
                 if self._col_is_string[col]:
@@ -115,7 +91,7 @@ class TransactionDataset(Dataset):
                         dtype=np.int64,
                     )
                 else:
-                    entry[col] = g[col].to_numpy(self._col_dtypes[col])
+                    entry[col] = g[col].to_numpy(self._col_dtypes[col], copy=True)
             self.clients.append(entry)
 
         # Flat index: (client_idx, _) — start position is sampled at fetch time
@@ -232,8 +208,8 @@ class PairedClientBatchSampler(Sampler[list[int]]):
             batch: list[int] = []
             for ci in chunk:
                 picks = self._rng.choice(
-                    self._by_client[ci], 
-                    size=self.windows_per_pair, 
+                    self._by_client[ci],
+                    size=self.windows_per_pair,
                     replace=False, # finestre DISTINTE
                 )
                 batch.extend(int(p) for p in picks)
@@ -256,39 +232,171 @@ def collate(items: list[tuple[dict[str, torch.Tensor], int]]):
 
 
 # ---------------------------------------------------------------------------
-# Convenience
+# DataModule — callable wrapper around the load → fit → dataset → loader pipeline
 # ---------------------------------------------------------------------------
 
-def load_dataframe(path: Path | str = Path("data") / "transactions.csv") -> pd.DataFrame:
-    """Load transactions from a CSV/parquet file or a folder of either type.
+class DataModule:
+    """Callable bundle that produces a ready-to-iterate training loader.
 
-    - File ``*.csv`` → :func:`pandas.read_csv`
-    - File ``*.parquet`` → :func:`pandas.read_parquet`
-    - Folder → all top-level ``*.csv`` are concatenated, or all ``*.parquet``
-      are read together via :func:`pandas.read_parquet` (which natively handles
-      a directory of parquet parts).  Mixing both extensions in the same folder
-      is rejected.
+    The CSV/parquet I/O and the per-feature normalizer fitting live
+    *inside* this class (private methods).  The Dataset, Sampler and
+    collate function are kept module-level on purpose: they are
+    standalone PyTorch concepts reused by the DataLoader.
+
+    Column names live in :class:`DataConfig` (non-embedded: client id,
+    timestamp, delta_t) and in :data:`FEATURE_COLS` (embedded columns).
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"{path} not found")
 
-    if path.is_dir():
-        parquets = sorted(path.glob("*.parquet"))
-        csvs = sorted(path.glob("*.csv"))
-        if parquets and csvs:
-            raise ValueError(f"{path} contains both .parquet and .csv files")
-        if parquets:
-            return pd.read_parquet(path)
-        if csvs:
-            return pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
-        raise FileNotFoundError(f"No .csv or .parquet files in {path}")
+    def __init__(
+        self,
+        args: "TrainingArgs",
+        features: list[FeatureSpec] | None = None,
+        data_config: DataConfig | None = None,
+    ):
+        from .model import DEFAULT_FEATURES  # local import: avoids cycle
 
-    if path.suffix == ".parquet":
-        return pd.read_parquet(path)
-    if path.suffix == ".csv":
-        return pd.read_csv(path)
-    raise ValueError(f"Unsupported file extension: {path.suffix} ({path})")
+        self.args = args
+        self.base_features = features if features is not None else DEFAULT_FEATURES
+        self.data_config = data_config if data_config is not None else DataConfig()
+        self.features: list[FeatureSpec] | None = None
+        self.train_loader: DataLoader | None = None
+        self.val_loader: DataLoader | None = None
+
+    def __call__(self) -> tuple[DataLoader, DataLoader | None, list[FeatureSpec]]:
+        df = self._load_dataframe()
+        train_df, val_df = self._split_clients(df)
+        self.features = self._fit_features(train_df)
+
+        self.train_loader = self._build_loader(train_df, tag="train")
+        self.val_loader = self._build_loader(val_df, tag="val") if val_df is not None else None
+        return self.train_loader, self.val_loader, self.features
+
+    def _split_clients(
+        self, df: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+        """Hold out a deterministic fraction of clients for validation.
+
+        Returns ``(train_df, val_df)``.  If ``args.val_frac == 0`` or the
+        resulting val set is empty, ``val_df`` is ``None``.
+        """
+        cid_col = self.data_config.client_col
+        all_clients = df[cid_col].unique()
+        val_frac = float(self.args.val_frac)
+        if val_frac <= 0:
+            logger.info("val_frac=0 → no validation split")
+            return df, None
+
+        rng = np.random.default_rng(self.args.seed)
+        shuffled = rng.permutation(all_clients)
+        n_val = int(round(len(shuffled) * val_frac))
+        if n_val <= 0:
+            logger.warning(
+                "val_frac={:.3f} rounds to 0 clients (have {}); skipping val split",
+                val_frac, len(shuffled),
+            )
+            return df, None
+
+        val_ids = set(shuffled[:n_val].tolist())
+        train_mask = ~df[cid_col].isin(val_ids)
+        train_df = df[train_mask].reset_index(drop=True)
+        val_df = df[~train_mask].reset_index(drop=True)
+        logger.info(
+            "Client split: {} train / {} val (val_frac={:.2f}, seed={})",
+            train_df[cid_col].nunique(), val_df[cid_col].nunique(),
+            val_frac, self.args.seed,
+        )
+        return train_df, val_df
+
+    def _build_loader(self, df: pd.DataFrame, tag: str) -> DataLoader:
+        dataset = self._build_dataset(df, tag=tag)
+        sampler = self._build_sampler(dataset)
+        loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate)
+        logger.info(
+            "{} loader ready: {} batches/epoch, batch size {} "
+            "({} clients × {} windows)",
+            tag.capitalize(), len(sampler), self.args.batch_size,
+            self.args.clients_per_batch, self.args.windows_per_pair,
+        )
+        return loader
+
+    def _load_dataframe(self) -> pd.DataFrame:
+        """Load transactions from a CSV/parquet file or a folder of either type.
+
+        - File ``*.csv`` → :func:`pandas.read_csv`
+        - File ``*.parquet`` → :func:`pandas.read_parquet`
+        - Folder → all top-level ``*.csv`` are concatenated, or all ``*.parquet``
+          are read together via :func:`pandas.read_parquet`.  Mixing both
+          extensions in the same folder is rejected.
+        """
+        path = Path(self.args.csv_path)
+        logger.info("Loading dataframe from {}", path)
+        if not path.exists():
+            raise FileNotFoundError(f"{path} not found")
+
+        if path.is_dir():
+            parquets = sorted(path.glob("*.parquet"))
+            csvs = sorted(path.glob("*.csv"))
+            if parquets and csvs:
+                raise ValueError(f"{path} contains both .parquet and .csv files")
+            if parquets:
+                df = pd.read_parquet(path)
+            elif csvs:
+                df = pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
+            else:
+                raise FileNotFoundError(f"No .csv or .parquet files in {path}")
+        elif path.suffix == ".parquet":
+            df = pd.read_parquet(path)
+        elif path.suffix == ".csv":
+            df = pd.read_csv(path)
+        else:
+            raise ValueError(f"Unsupported file extension: {path.suffix} ({path})")
+
+        logger.info(
+            "Loaded {:,} rows / {} clients",
+            len(df), df["client_id"].nunique(),
+        )
+        return df
+
+    def _fit_features(self, df: pd.DataFrame) -> list[FeatureSpec]:
+        """Fit per-feature normalizers from the training DataFrame.
+
+        Only :class:`NumericFeature` specs are fitted (clip+log1p+z-score).
+        Categorical features keep their explicit ``vocab_size``.
+        """
+        logger.info("Fitting per-feature normalizers/vocabularies")
+        for feat in self.base_features:
+            if isinstance(feat, NumericFeature) and feat.name in df.columns:
+                feat.fit(df[feat.name].to_numpy(copy=True))
+        logger.debug(
+            "Feature schema: {}",
+            [(f.__class__.__name__, f.name) for f in self.base_features],
+        )
+        return self.base_features
+
+    def _build_dataset(self, df: pd.DataFrame, tag: str = "train") -> TransactionDataset:
+        logger.info(
+            "Building {} TransactionDataset (seq_len={}, windows_per_client={})",
+            tag, self.args.seq_len, self.args.windows_per_client,
+        )
+        ds = TransactionDataset(
+            df,
+            client_col=self.data_config.client_col,
+            timestamp_col=self.data_config.timestamp_col,
+            feature_cols=FEATURE_COLS,
+            seq_len=self.args.seq_len,
+            windows_per_client=self.args.windows_per_client,
+            seed=self.args.seed,
+        )
+        logger.info("{} dataset built: {:,} windows total", tag, len(ds))
+        return ds
+
+    def _build_sampler(self, dataset: TransactionDataset) -> PairedClientBatchSampler:
+        return PairedClientBatchSampler(
+            dataset,
+            clients_per_batch=self.args.clients_per_batch,
+            windows_per_pair=self.args.windows_per_pair,
+            seed=self.args.seed,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -296,40 +404,15 @@ def load_dataframe(path: Path | str = Path("data") / "transactions.csv") -> pd.D
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from torch.utils.data import DataLoader
+    from .config import TrainingArgs
 
-    DEFAULT_FEATURES: list[FeatureSpec] = [
-        NumericFeature("importo", signed=True),
-        NumericFeature("saldo_post"),
-        NumericFeature("delta_t"),
-        HighCardCategoricalFeature("merchant"),
-        CategoricalFeature("mcc",        801),
-        CategoricalFeature("canale",      11),
-        CategoricalFeature("macro_tipo",   9),
-        CategoricalFeature("sotto_tipo",  41),
-        CategoricalFeature("divisa",       6),
-        DatetimeFeature("timestamp"),
-    ]
+    args = TrainingArgs()
+    train_loader, val_loader, features = DataModule(args)()
 
-    df = load_dataframe()
-    features = fit_features(df, DEFAULT_FEATURES)
-    ds = TransactionDataset(
-        df,
-        client_col="client_id",
-        timestamp_col="timestamp",
-        feature_cols=[
-            "importo", "saldo_post", "merchant", "mcc",
-            "canale", "macro_tipo", "sotto_tipo", "divisa",
-        ],
-        seq_len=32,
-        windows_per_client=4,
-    )
-    sampler = PairedClientBatchSampler(ds, clients_per_batch=8, windows_per_pair=2)
-    loader = DataLoader(ds, 
-                        batch_sampler=sampler, 
-                        collate_fn=collate)
-
-    batch, client_ids = next(iter(loader))
-    print(f"batch size = {client_ids.size(0)}  unique clients = {client_ids.unique().numel()}")
+    batch, client_ids = next(iter(train_loader))
+    print(f"train batch size = {client_ids.size(0)}  unique clients = {client_ids.unique().numel()}")
     for k, v in batch.items():
         print(f"  {k:13s} {tuple(v.shape)}  {v.dtype}")
+    if val_loader is not None:
+        vb, vcid = next(iter(val_loader))
+        print(f"val batch size = {vcid.size(0)}  unique clients = {vcid.unique().numel()}")

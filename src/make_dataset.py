@@ -20,8 +20,8 @@ import pandas as pd
 # Configuration
 # ---------------------------------------------------------------------------
 
-N_TRANSACTIONS = 10_000
-N_CLIENTS = 100
+N_TRANSACTIONS = 200_000
+N_CLIENTS = 2_000
 
 TS_BASE = 1_577_836_800            # 2020-01-01 00:00 UTC
 TS_RANGE = 4 * 365 * 24 * 3600     # ~4 years in seconds
