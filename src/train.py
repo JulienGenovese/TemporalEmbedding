@@ -92,6 +92,28 @@ class Trainer:
         else:
             logger.info("Validation disabled (no val_loader)")
 
+        # Early stopping: monitors the validation loss. Only active when a
+        # val_loader exists and val_every > 0 — otherwise there is no signal.
+        self.early_stopping = (
+            args.early_stopping_patience > 0
+            and self.val_loader is not None
+            and args.val_every > 0
+        )
+        if self.early_stopping:
+            logger.info(
+                "Early stopping enabled: patience={} val check(s), min_delta={}",
+                args.early_stopping_patience, args.early_stopping_min_delta,
+            )
+        elif args.early_stopping_patience > 0:
+            logger.warning(
+                "Early stopping requested but inactive (needs a val_loader "
+                "and val_every > 0)",
+            )
+        self.best_val_loss = float("inf")
+        self.best_epoch = 0
+        self.best_state: dict[str, torch.Tensor] | None = None
+        self.epochs_no_improve = 0
+
         self.history: list[dict] = []
         self.train_eval_history: list[dict] = []
         self.val_history: list[dict] = []
@@ -246,6 +268,35 @@ class Trainer:
             "infonce_acc": sum(agg["infonce_acc"]) / n,
         }
 
+    def _check_early_stopping(self, val_loss: float, epoch: int) -> bool:
+        """Update best-checkpoint bookkeeping from ``val_loss``.
+
+        Snapshots the model weights whenever the validation loss improves
+        by more than ``early_stopping_min_delta``; otherwise increments the
+        no-improvement counter.  Returns ``True`` when patience is exhausted
+        and training should stop.
+        """
+        if val_loss < self.best_val_loss - self.args.early_stopping_min_delta:
+            self.best_val_loss = val_loss
+            self.best_epoch = epoch
+            self.epochs_no_improve = 0
+            self.best_state = {
+                k: v.detach().cpu().clone()
+                for k, v in self.model.state_dict().items()
+            }
+            logger.info(
+                "New best val loss {:.4f} at epoch {}", val_loss, epoch,
+            )
+            return False
+
+        self.epochs_no_improve += 1
+        logger.info(
+            "No val-loss improvement for {}/{} check(s) (best {:.4f} @ epoch {})",
+            self.epochs_no_improve, self.args.early_stopping_patience,
+            self.best_val_loss, self.best_epoch,
+        )
+        return self.epochs_no_improve >= self.args.early_stopping_patience
+
     def _train(self) -> Path:
         torch.manual_seed(self.args.seed)
         self.model.train()
@@ -274,6 +325,15 @@ class Trainer:
                         val_eval["loss"], val_eval["loss_mtm"],
                         val_eval["loss_contrastive"], val_eval["infonce_acc"],
                     )
+                    if self.early_stopping and self._check_early_stopping(
+                        val_eval["loss"], epoch,
+                    ):
+                        logger.info(
+                            "Early stopping at epoch {} — no improvement for "
+                            "{} validation check(s)",
+                            epoch, self.args.early_stopping_patience,
+                        )
+                        break
                 else:
                     logger.info(
                         "EVAL epoch {} | train: loss={:.4f} mtm={:.4f} "
@@ -282,6 +342,13 @@ class Trainer:
                         train_eval["loss_contrastive"], train_eval["infonce_acc"],
                     )
         logger.info("Training complete after {} steps", self.step)
+
+        if self.best_state is not None:
+            logger.info(
+                "Restoring best weights from epoch {} (val loss {:.4f})",
+                self.best_epoch, self.best_val_loss,
+            )
+            self.model.load_state_dict(self.best_state)
         return self._save()
 
     def _save(self) -> Path:

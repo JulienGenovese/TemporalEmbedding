@@ -74,6 +74,9 @@ class TrainingConfig:
     val_frac: float = 0.2   # fraction of client_ids held out for validation (0 disables)
     val_every: int = 1      # run validation every N epochs (0 disables)
 
+    early_stopping_patience: int = 5    # stop after N validation checks with no val-loss improvement (0 disables)
+    early_stopping_min_delta: float = 0.0  # minimum val-loss decrease to count as an improvement
+
     log_every: int = 5
     device: str | None = None
     seed: int = 0
