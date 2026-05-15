@@ -4,7 +4,7 @@ End-to-end pre-training of :class:`EmbeddingModel` on a synthetic CSV dataset.
 Reads ``data/transactions.csv`` (produced by :mod:`src.make_dataset`),
 fits per-feature normalizers/vocabularies, and runs the joint
 MTM + InfoNCE objective.  Default hyper-parameters (see
-:class:`src.config.TrainingArgs`) are sized for a CPU smoke test
+:class:`src.config.TrainingConfig`) are sized for a CPU smoke test
 (~3-5 min on a laptop).
 
 Usage:
@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 import torch
@@ -22,10 +23,10 @@ import torch.nn as nn
 from loguru import logger
 from torch.utils.data import DataLoader
 
-from .config import TrainingArgs
+from .config import TrainingConfig
 from .data import DataModule
 from .encoder import (
-    DatetimeFeature, FeatureSpec, HighCardCategoricalFeature,
+    DatetimeFeature, FeatureSpec, HighCardCategoricalFeature, NumericFeature,
 )
 from .loss import PretrainLoss, info_nce_accuracy
 from .model import EmbeddingModel, count_parameters
@@ -40,7 +41,7 @@ class Trainer:
 
     def __init__(
         self,
-        args: TrainingArgs,
+        args: TrainingConfig,
         model: EmbeddingModel,
         loss: PretrainLoss,
         loader: DataLoader,
@@ -52,9 +53,23 @@ class Trainer:
         self.device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("Device is : {}", self.device)
 
+        # Mixed precision: float16 autocast on CUDA only (CPU keeps full
+        # precision so the smoke-test numerics stay reproducible).
+        self.device_type = self.device.split(":")[0]
+        self.use_amp = self.device_type == "cuda"
+        self.scaler = torch.amp.GradScaler(self.device_type, enabled=self.use_amp)
+        logger.info("AMP autocast: {}", self.use_amp)
+
         self.model = model.to(self.device)
         self.loss = loss.to(self.device)
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=args.lr)
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(
+            self.optimizer, gamma=args.lr_gamma,
+        )
 
         self.ckpt_dir = Path(args.ckpt_dir)
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -64,9 +79,11 @@ class Trainer:
         logger.info("Model parameters: {:,} total", param_stats["total"])
         logger.debug("Parameter breakdown: {}", param_stats)
         logger.info(
-            "Optimizer: AdamW(lr={}), grad_clip={}, mask_prob={}, "
+            "Optimizer: AdamW(lr={}, weight_decay={}), "
+            "ExponentialLR(gamma={}), grad_clip={}, mask_prob={}, "
             "contrastive_weight={}",
-            args.lr, args.grad_clip, args.mask_prob, args.contrastive_weight,
+            args.lr, args.weight_decay, args.lr_gamma, args.grad_clip,
+            args.mask_prob, args.contrastive_weight,
         )
         if self.val_loader is not None:
             logger.info(
@@ -91,6 +108,11 @@ class Trainer:
         and zero out masked positions in ``batch`` so the encoder cannot
         see them.  Padded positions are never masked.  Hash and datetime
         fields are not MTM targets (consistent with :class:`MTMHead`).
+
+        Numeric targets are normalised (clip → log1p → z-score) so the
+        smooth-L1 term lives on the same scale as the encoder input and
+        the categorical cross-entropy, instead of being dominated by the
+        raw euro magnitudes of ``importo``/``saldo_post``.
         """
         pad_mask = batch.get("padding_mask")
         targets: dict[str, torch.Tensor] = {}
@@ -100,7 +122,10 @@ class Trainer:
             if isinstance(feat, (HighCardCategoricalFeature, DatetimeFeature)):
                 continue
             name = feat.name
-            targets[name] = batch[name].clone()
+            if isinstance(feat, NumericFeature) and feat.normalizer is not None:
+                targets[name] = feat.normalizer(batch[name])
+            else:
+                targets[name] = batch[name].clone()
 
             m = torch.rand_like(batch[name], dtype=torch.float32) < self.args.mask_prob
             if pad_mask is not None:
@@ -121,16 +146,19 @@ class Trainer:
         targets, mtm_mask = self._build_mtm_targets(batch)
 
         self.optimizer.zero_grad(set_to_none=True)
-        output = self.model(batch)
-        output["temperature"] = self.model.backbone.contrastive_head.temperature
+        with torch.autocast(device_type=self.device_type, enabled=self.use_amp):
+            output = self.model(batch)
+            output["temperature"] = self.model.backbone.contrastive_head.temperature
+            losses = self.loss(output, targets, mtm_mask, client_ids)
+            loss = losses["loss"]
 
-        losses = self.loss(output, targets, mtm_mask, client_ids)
-        loss = losses["loss"]
-        loss.backward()
+        self.scaler.scale(loss).backward()
+        self.scaler.unscale_(self.optimizer)
         grad_norm = nn.utils.clip_grad_norm_(
             self.model.parameters(), self.args.grad_clip,
         )
-        self.optimizer.step()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
 
         with torch.no_grad():
             acc = info_nce_accuracy(output["contrastive_z"], client_ids)
@@ -144,6 +172,7 @@ class Trainer:
             "infonce_acc": float(acc.item()),
             "temperature": float(self.model.backbone.contrastive_head.temperature.item()),
             "grad_norm": float(grad_norm.item()),
+            "lr": float(self.optimizer.param_groups[0]["lr"]),
             "mtm_breakdown": {
                 k: float(v.item()) for k, v in losses["mtm_breakdown"].items()
             },
@@ -195,9 +224,10 @@ class Trainer:
                 client_ids = client_ids.to(self.device)
                 targets, mtm_mask = self._build_mtm_targets(batch)
 
-                output = self.model(batch)
-                output["temperature"] = self.model.backbone.contrastive_head.temperature
-                losses = self.loss(output, targets, mtm_mask, client_ids)
+                with torch.autocast(device_type=self.device_type, enabled=self.use_amp):
+                    output = self.model(batch)
+                    output["temperature"] = self.model.backbone.contrastive_head.temperature
+                    losses = self.loss(output, targets, mtm_mask, client_ids)
                 acc = info_nce_accuracy(output["contrastive_z"], client_ids)
 
                 agg["loss"].append(float(losses["loss"].item()))
@@ -223,6 +253,11 @@ class Trainer:
         logger.info("Starting training: {} epoch(s)", self.args.epochs)
         for epoch in range(1, self.args.epochs + 1):
             self._epoch(epoch)
+            self.scheduler.step()
+            logger.info(
+                "LR after epoch {}: {:.2e}",
+                epoch, self.optimizer.param_groups[0]["lr"],
+            )
             if self.args.val_every > 0 and epoch % self.args.val_every == 0:
                 train_eval = self._eval_epoch(self.loader, epoch)
                 self.train_eval_history.append(train_eval)
@@ -273,8 +308,8 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    args = TrainingArgs()
-    logger.info("TrainingArgs: {}", args)
+    args = TrainingConfig()
+    logger.info("TrainingConfig: {}", args)
 
     data = DataModule(args)
     train_loader, val_loader, features = data()
@@ -286,7 +321,10 @@ if __name__ == "__main__":
         device, use_ckpt,
     )
     model = EmbeddingModel(
-        features=features, pretrain=True, use_gradient_checkpointing=use_ckpt,
+        features=features, 
+        pretrain=True, 
+        use_gradient_checkpointing=use_ckpt,
+        **asdict(args.model),
     )
     loss = PretrainLoss(contrastive_weight=args.contrastive_weight)
 

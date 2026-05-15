@@ -13,9 +13,9 @@ from .sequence_encoder import SequenceTransformer
 from .loss import MTMHead, ContrastiveHead
 
 
-# Default feature schema matching the original 13-field design:
-#   importo(signed) → 2, saldo_post → 1, delta_t → 1, merchant(hash) → 1,
-#   mcc/canale/macro_tipo/sotto_tipo/divisa → 5, timestamp → 3   total = 13
+# Default feature schema — 9 field slots:
+#   importo(signed) → 2, saldo_post → 1, merchant(hash) → 1,
+#   mcc/canale/macro_tipo/sotto_tipo/divisa → 5   total = 9
 
 
 
@@ -205,7 +205,7 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     # Instantiate model
-    model = TransactionTransformer(pretrain=True).to(device)
+    model = TransactionTransformer(features=DEFAULT_FEATURES, pretrain=True).to(device)
 
     # Parameter count
     params = count_parameters(model)

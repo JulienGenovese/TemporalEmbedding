@@ -72,7 +72,7 @@ for feat, enc in zip(self.features, self.encoders):
 
 **Adding a new feature type** = one new dataclass with `build` / `encode` / `n_slots`, zero changes elsewhere.
 
-`TransactionEncoder.n_fields` is computed from the schema and is passed into `FieldTransformer` (which sizes its learnable field-type positional encoding accordingly). The default schema lives in `src/model.py` as `DEFAULT_FEATURES` and produces 13 slots to match the original design.
+`TransactionEncoder.n_fields` is computed from the schema and is passed into `FieldTransformer` (which sizes its learnable field-type positional encoding accordingly). The default schema lives in `src/model.py` as `DEFAULT_FEATURES` and produces 9 slots (`importo` signed → 2, `saldo_post` → 1, `merchant` hash → 1, `mcc`/`canale`/`macro_tipo`/`sotto_tipo`/`divisa` → 5). It does **not** include a `DatetimeFeature`: the `timestamp` column is loaded into the batch but consumed only to derive `delta_t`, not embedded.
 
 ### Consequence: loss heads track the schema
 
@@ -84,7 +84,7 @@ Padding is represented by **index 0** for categoricals/hashes and **value 0** fo
 
 ### Time flows end-to-end
 
-`delta_t` (seconds between consecutive transactions) is both a regular numeric input field AND used directly by `SequenceTransformer.TimeAwarePositionalEncoding` — a fixed sinusoidal PE driven by real time gaps instead of integer positions. The [CLS] token is given `delta_t=0`.
+`delta_t` (seconds between consecutive transactions) is derived at load time and used directly by `SequenceTransformer.TimeAwarePositionalEncoding` — a fixed sinusoidal PE driven by real time gaps instead of integer positions. The [CLS] token is given `delta_t=0`. `delta_t` is **not** part of the encoder schema (`DEFAULT_FEATURES`), so it is never an MTM target.
 
 ## Notes on modifying the schema
 
@@ -133,4 +133,6 @@ CSV columns: `client_id, timestamp, importo, saldo_post, merchant, mcc, canale, 
 * ``checkpoints/plots/training_curves.png`` — 6-panel summary (totale, MTM in log, InfoNCE, accuracy, temperature, grad norm) with a moving-average overlay
 * ``checkpoints/plots/mtm_breakdown.png``  — per-field MTM curves (categorical CE on linear axis, numeric smooth-L1 on log axis)
 
-Note: numeric MTM targets are the **raw** field values, not the normalised ones the encoder consumes. As a result `loss_mtm` is dominated by `saldo_post` and `delta_t`. The contrastive head still learns; this asymmetry is a known design point of `MTMHead` and not a bug introduced by the data pipeline.
+`uv run python -m src.plots --tensorboard` additionally replays the same JSON history into TensorBoard event files under ``runs/<timestamp>/`` via `TensorBoardExporter` (a post-hoc class in `src/plots.py`, no training-loop changes). View with `tensorboard --logdir runs`. Scalars are grouped as `train/*` (per-step), `mtm/*` (per-field), `eval_train/*` and `eval_val/*` (per-epoch).
+
+Note: numeric MTM targets are **normalised** — `Trainer._build_mtm_targets` applies each `NumericFeature.normalizer` (clip → log1p → z-score) so the smooth-L1 term lives on the same scale as the encoder input and the categorical cross-entropy, rather than being dominated by the raw euro magnitudes of `saldo_post`/`importo`.

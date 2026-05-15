@@ -12,4 +12,5 @@ wheels/
 # Generated artifacts
 data/
 checkpoints/
+runs/
 notebooks/*

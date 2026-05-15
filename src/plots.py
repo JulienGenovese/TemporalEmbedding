@@ -7,15 +7,21 @@ PNGs under ``checkpoints/plots/``:
     accuracy + learnable temperature + gradient norm
   * ``mtm_breakdown.png``  — per-field MTM loss (one curve per cat_*/num_* head)
 
+With ``--tensorboard`` the same history is also replayed into TensorBoard
+event files under ``runs/<timestamp>/`` via :class:`TensorBoardExporter`.
+
 Usage:
     uv run python -m src.plots                                  # default paths
     uv run python -m src.plots --history path/to/history.json
+    uv run python -m src.plots --tensorboard                    # + TB export
+    tensorboard --logdir runs
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 import matplotlib
@@ -140,6 +146,84 @@ def plot_mtm_breakdown(
 
 
 # ---------------------------------------------------------------------------
+# TensorBoard export
+# ---------------------------------------------------------------------------
+
+class TensorBoardExporter:
+    """Replays JSON training history into TensorBoard event files.
+
+    Post-hoc counterpart of the matplotlib plots above: it consumes the
+    same artifacts written by :mod:`src.train` (``history.json`` and the
+    optional ``train_eval_history.json`` / ``val_history.json``) and emits
+    event files — no changes to the training loop required.
+
+    Scalar layout (so TensorBoard groups them sensibly):
+      * ``train/*``      — per-step scalars, x-axis = global step
+      * ``mtm/*``        — per-field MTM losses, x-axis = global step
+      * ``eval_train/*`` — epoch-level eval over the train loader
+      * ``eval_val/*``   — epoch-level eval over the val loader
+
+    Usable as a context manager so the writer is always flushed/closed.
+    """
+
+    _STEP_KEYS = (
+        "loss", "loss_mtm", "loss_contrastive",
+        "infonce_acc", "temperature", "grad_norm", "lr",
+    )
+    _EVAL_KEYS = ("loss", "loss_mtm", "loss_contrastive", "infonce_acc")
+
+    def __init__(self, log_dir: Path | str):
+        from torch.utils.tensorboard import SummaryWriter
+
+        self.log_dir = Path(log_dir)
+        self._writer = SummaryWriter(log_dir=str(self.log_dir))
+
+    def add_history(self, history: list[dict]) -> None:
+        """Per-step scalars + per-field MTM breakdown."""
+        for h in history:
+            step = h["step"]
+            for key in self._STEP_KEYS:
+                if key in h:
+                    self._writer.add_scalar(f"train/{key}", h[key], step)
+            for key, val in h.get("mtm_breakdown", {}).items():
+                self._writer.add_scalar(f"mtm/{key}", val, step)
+
+    def add_eval(self, eval_history: list[dict], tag: str) -> None:
+        """Epoch-level eval scalars under ``<tag>/*`` (x-axis = epoch)."""
+        for e in eval_history:
+            epoch = e["epoch"]
+            for key in self._EVAL_KEYS:
+                if key in e:
+                    self._writer.add_scalar(f"{tag}/{key}", e[key], epoch)
+
+    def close(self) -> None:
+        self._writer.flush()
+        self._writer.close()
+
+    def __enter__(self) -> "TensorBoardExporter":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+def export_tensorboard(history_path: Path | str, runs_dir: Path | str) -> Path:
+    """Replay ``history_path`` (and sibling eval files) into a fresh TB run."""
+    history_path = Path(history_path)
+    run_dir = Path(runs_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+    with TensorBoardExporter(run_dir) as tb:
+        tb.add_history(load_history(history_path))
+        for fname, tag in (
+            ("train_eval_history.json", "eval_train"),
+            ("val_history.json",        "eval_val"),
+        ):
+            f = history_path.with_name(fname)
+            if f.exists():
+                tb.add_eval(json.loads(f.read_text()), tag)
+    return run_dir
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -147,6 +231,8 @@ def main(
     history_path: Path | str = Path("checkpoints") / "history.json",
     out_dir: Path | str = Path("checkpoints") / "plots",
     smoothing: int = 3,
+    tensorboard: bool = False,
+    runs_dir: Path | str = Path("runs"),
 ) -> None:
     history = load_history(history_path)
     out_dir = Path(out_dir)
@@ -159,11 +245,20 @@ def main(
     else:
         print("No mtm_breakdown in history — skipping per-field plot.")
 
+    if tensorboard:
+        run_dir = export_tensorboard(history_path, runs_dir)
+        print(f"TensorBoard events → {run_dir}  (tensorboard --logdir {runs_dir})")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--history", default="checkpoints/history.json")
     parser.add_argument("--out-dir", default="checkpoints/plots")
     parser.add_argument("--smoothing", type=int, default=3)
+    parser.add_argument("--tensorboard", action="store_true",
+                        help="also export the history into TensorBoard event files")
+    parser.add_argument("--runs-dir", default="runs",
+                        help="parent directory for TensorBoard run folders")
     args = parser.parse_args()
-    main(args.history, args.out_dir, args.smoothing)
+    main(args.history, args.out_dir, args.smoothing,
+         tensorboard=args.tensorboard, runs_dir=args.runs_dir)

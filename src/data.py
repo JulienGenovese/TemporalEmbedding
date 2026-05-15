@@ -26,7 +26,7 @@ from .encoder import (
 from .config import FEATURE_COLS, DataConfig
 
 if TYPE_CHECKING:
-    from .config import TrainingArgs
+    from .config import TrainingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +249,7 @@ class DataModule:
 
     def __init__(
         self,
-        args: "TrainingArgs",
+        args: "TrainingConfig",
         features: list[FeatureSpec] | None = None,
         data_config: DataConfig | None = None,
     ):
@@ -404,9 +404,9 @@ class DataModule:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from .config import TrainingArgs
+    from .config import TrainingConfig
 
-    args = TrainingArgs()
+    args = TrainingConfig()
     train_loader, val_loader, features = DataModule(args)()
 
     batch, client_ids = next(iter(train_loader))
