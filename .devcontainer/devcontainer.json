@@ -1,14 +1,15 @@
 {
   "name": "embeddingclient",
   "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "dev"
   },
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
 
-  // Install the project itself (editable) into the pre-built venv after the
-  // workspace is mounted. All heavy deps are already in /opt/venv from the image.
+  // Re-sync against the mounted lockfile. All heavy deps are already baked
+  // into /opt/venv by the image, so this is a fast no-op when nothing changed.
   "postCreateCommand": "UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen",
 
   "customizations": {
