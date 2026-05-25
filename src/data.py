@@ -89,13 +89,22 @@ class TransactionDataset(Dataset):
                 "timestamp": g[timestamp_col].to_numpy(np.int64, copy=True),
             }
             for col in self.feature_cols:
+                if self._col_dtypes[col] == np.float32:
+                    entry[col] = g[col].to_numpy(np.float32, copy=True)
+                    continue
                 if self._col_is_string[col]:
-                    entry[col] = np.array(
-                        [HighCardCategoricalFeature._to_int(v) for v in g[col]],
-                        dtype=np.int64,
+                    arr = np.fromiter(
+                        (HighCardCategoricalFeature._to_int(v) for v in g[col]),
+                        dtype=np.int64, count=len(g),
                     )
                 else:
-                    entry[col] = g[col].to_numpy(self._col_dtypes[col], copy=True)
+                    arr = g[col].to_numpy(np.int64)
+                # Store integer columns at the smallest lossless width to cut RAM
+                # (small-vocab categoricals → int8/int16; the 64-bit merchant hash
+                # stays int64). _pad_long upcasts back to int64 at fetch, which is
+                # what nn.Embedding consumes. astype(copy=True) also frees the
+                # source DataFrame once the loop ends.
+                entry[col] = arr.astype(_compact_int_dtype(arr))
             self.clients.append(entry)
 
         # Flat index: (client_idx, slot). The slot selects a disjoint bucket of
@@ -171,6 +180,22 @@ def _pad_long(arr: np.ndarray, pad: int) -> torch.Tensor:
     if pad:
         t = torch.cat([t, torch.zeros(pad, dtype=torch.int64)])
     return t
+
+
+def _compact_int_dtype(arr: np.ndarray) -> np.dtype:
+    """Smallest signed int dtype that holds ``arr`` losslessly (≥ int8).
+
+    IDs/indices are non-negative, but we stay signed so the int64 upcast in
+    :func:`_pad_long` is unambiguous. Empty arrays default to ``int8``.
+    """
+    if arr.size == 0:
+        return np.dtype(np.int8)
+    lo, hi = int(arr.min()), int(arr.max())
+    for dt in (np.int8, np.int16, np.int32):
+        info = np.iinfo(dt)
+        if lo >= info.min and hi <= info.max:
+            return np.dtype(dt)
+    return np.dtype(np.int64)
 
 
 # ---------------------------------------------------------------------------
