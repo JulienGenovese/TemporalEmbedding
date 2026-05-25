@@ -28,7 +28,7 @@ from .data import DataModule
 from .encoder import (
     DatetimeFeature, FeatureSpec, HighCardCategoricalFeature, NumericFeature,
 )
-from .loss import PretrainLoss, info_nce_accuracy
+from .loss import PretrainLoss, info_nce_metrics
 from .model import EmbeddingModel, count_parameters
 
 
@@ -183,7 +183,7 @@ class Trainer:
         self.scaler.update()
 
         with torch.no_grad():
-            acc = info_nce_accuracy(output["contrastive_z"], client_ids)
+            metrics = info_nce_metrics(output["contrastive_z"], client_ids)
 
         self.step += 1
         entry = {
@@ -191,7 +191,9 @@ class Trainer:
             "loss": float(loss.item()),
             "loss_mtm": float(losses["loss_mtm"].item()),
             "loss_contrastive": float(losses["loss_contrastive"].item()),
-            "infonce_acc": float(acc.item()),
+            "infonce_acc": float(metrics["infonce_acc"].item()),
+            "infonce_acc_random": float(metrics["infonce_acc_random"].item()),
+            "infonce_lift": float(metrics["infonce_lift"].item()),
             "temperature": float(self.model.backbone.contrastive_head.temperature.item()),
             "grad_norm": float(grad_norm.item()),
             "lr": float(self.optimizer.param_groups[0]["lr"]),
@@ -213,10 +215,11 @@ class Trainer:
             if self.step % self.args.log_every == 0 or self.step == 1:
                 logger.info(
                     "epoch {} step {:>4} | loss={:.4f} mtm={:.4f} con={:.4f} "
-                    "acc={:.3f} |g|={:.2f}",
+                    "acc={:.3f} (rand={:.3f} lift={:.3f}) |g|={:.2f}",
                     epoch, self.step, entry["loss"],
                     entry["loss_mtm"], entry["loss_contrastive"],
-                    entry["infonce_acc"], entry["grad_norm"],
+                    entry["infonce_acc"], entry["infonce_acc_random"],
+                    entry["infonce_lift"], entry["grad_norm"],
                 )
 
         avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -239,7 +242,10 @@ class Trainer:
         for the epoch.
         """
         self.model.eval()
-        agg = {"loss": [], "loss_mtm": [], "loss_contrastive": [], "infonce_acc": []}
+        agg: dict[str, list[float]] = {
+            "loss": [], "loss_mtm": [], "loss_contrastive": [],
+            "infonce_acc": [], "infonce_acc_random": [], "infonce_lift": [],
+        }
         with torch.no_grad():
             for batch, client_ids in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
@@ -250,12 +256,14 @@ class Trainer:
                     output = self.model(batch)
                     output["temperature"] = self.model.backbone.contrastive_head.temperature
                     losses = self.loss(output, targets, mtm_mask, client_ids)
-                acc = info_nce_accuracy(output["contrastive_z"], client_ids)
+                metrics = info_nce_metrics(output["contrastive_z"], client_ids)
 
                 agg["loss"].append(float(losses["loss"].item()))
                 agg["loss_mtm"].append(float(losses["loss_mtm"].item()))
                 agg["loss_contrastive"].append(float(losses["loss_contrastive"].item()))
-                agg["infonce_acc"].append(float(acc.item()))
+                agg["infonce_acc"].append(float(metrics["infonce_acc"].item()))
+                agg["infonce_acc_random"].append(float(metrics["infonce_acc_random"].item()))
+                agg["infonce_lift"].append(float(metrics["infonce_lift"].item()))
         self.model.train()
 
         n = max(len(agg["loss"]), 1)
@@ -266,6 +274,8 @@ class Trainer:
             "loss_mtm": sum(agg["loss_mtm"]) / n,
             "loss_contrastive": sum(agg["loss_contrastive"]) / n,
             "infonce_acc": sum(agg["infonce_acc"]) / n,
+            "infonce_acc_random": sum(agg["infonce_acc_random"]) / n,
+            "infonce_lift": sum(agg["infonce_lift"]) / n,
         }
 
     def _check_early_stopping(self, val_loss: float, epoch: int) -> bool:
@@ -317,13 +327,17 @@ class Trainer:
                     self.val_history.append(val_eval)
                     logger.info(
                         "EVAL epoch {} | "
-                        "train: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} | "
-                        "val:   loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f}",
+                        "train: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
+                        "(rand={:.3f} lift={:.3f}) | "
+                        "val:   loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
+                        "(rand={:.3f} lift={:.3f})",
                         epoch,
                         train_eval["loss"], train_eval["loss_mtm"],
                         train_eval["loss_contrastive"], train_eval["infonce_acc"],
+                        train_eval["infonce_acc_random"], train_eval["infonce_lift"],
                         val_eval["loss"], val_eval["loss_mtm"],
                         val_eval["loss_contrastive"], val_eval["infonce_acc"],
+                        val_eval["infonce_acc_random"], val_eval["infonce_lift"],
                     )
                     if self.early_stopping and self._check_early_stopping(
                         val_eval["loss"], epoch,
@@ -337,9 +351,11 @@ class Trainer:
                 else:
                     logger.info(
                         "EVAL epoch {} | train: loss={:.4f} mtm={:.4f} "
-                        "con={:.4f} acc={:.3f} (no val loader)",
+                        "con={:.4f} acc={:.3f} (rand={:.3f} lift={:.3f}) "
+                        "(no val loader)",
                         epoch, train_eval["loss"], train_eval["loss_mtm"],
                         train_eval["loss_contrastive"], train_eval["infonce_acc"],
+                        train_eval["infonce_acc_random"], train_eval["infonce_lift"],
                     )
         logger.info("Training complete after {} steps", self.step)
 

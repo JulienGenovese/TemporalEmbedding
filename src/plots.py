@@ -69,30 +69,41 @@ def plot_training_curves(
     out_path: Path,
     smoothing: int = 3,
 ) -> Path:
-    """Six-panel summary of the run."""
+    """Eight-panel summary of the run.
+
+    The "InfoNCE top-1 acc" panel overlays the random baseline
+    ``infonce_acc_random`` so the lift is visible at a glance; a
+    dedicated panel tracks the normalized lift itself.
+    """
     steps = _column(history, "step")
     panels = [
-        ("Total loss",        "loss",             False),
-        ("MTM loss",          "loss_mtm",         True),   # often huge → log scale
-        ("InfoNCE loss",      "loss_contrastive", False),
-        ("InfoNCE top-1 acc", "infonce_acc",      False),
-        ("Temperature",       "temperature",      False),
-        ("Grad norm",         "grad_norm",        False),
+        ("Total loss",                 "loss",             False),
+        ("MTM loss",                   "loss_mtm",         True),   # often huge → log scale
+        ("InfoNCE loss",               "loss_contrastive", False),
+        ("InfoNCE top-1 acc vs random","infonce_acc",      False),  # special: overlays random baseline
+        ("InfoNCE normalized lift",    "infonce_lift",     False),
+        ("Temperature",                "temperature",      False),
+        ("Grad norm",                  "grad_norm",        False),
+        ("Learning rate",              "lr",               False),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(2, 4, figsize=(20, 8))
     for ax, (title, key, log) in zip(axes.flat, panels):
         raw = _column(history, key)
         ax.plot(steps, raw, alpha=0.35, label="raw")
         if smoothing > 1:
             ax.plot(steps, _smooth(raw, smoothing),
                     color="C0", label=f"ma({smoothing})")
+        if key == "infonce_acc" and history and "infonce_acc_random" in history[0]:
+            rand = _column(history, "infonce_acc_random")
+            ax.plot(steps, rand, color="C3", linestyle="--",
+                    alpha=0.7, label="random baseline")
         ax.set_title(title)
         ax.set_xlabel("step")
         ax.grid(True, alpha=0.3)
         if log:
             ax.set_yscale("log")
-        if smoothing > 1:
+        if smoothing > 1 or key == "infonce_acc":
             ax.legend(loc="best", fontsize=8)
 
     fig.suptitle("Training curves", y=1.02)
@@ -168,9 +179,13 @@ class TensorBoardExporter:
 
     _STEP_KEYS = (
         "loss", "loss_mtm", "loss_contrastive",
-        "infonce_acc", "temperature", "grad_norm", "lr",
+        "infonce_acc", "infonce_acc_random", "infonce_lift",
+        "temperature", "grad_norm", "lr",
     )
-    _EVAL_KEYS = ("loss", "loss_mtm", "loss_contrastive", "infonce_acc")
+    _EVAL_KEYS = (
+        "loss", "loss_mtm", "loss_contrastive",
+        "infonce_acc", "infonce_acc_random", "infonce_lift",
+    )
 
     def __init__(self, log_dir: Path | str):
         from torch.utils.tensorboard import SummaryWriter

@@ -190,23 +190,51 @@ def mtm_loss(
     return total
 
 
-def info_nce_accuracy(z: torch.Tensor, client_ids: torch.Tensor) -> torch.Tensor:
-    """Top-1 retrieval accuracy: fraction of samples whose nearest neighbour
-    (excluding self) belongs to the same client.
+def info_nce_metrics(
+    z: torch.Tensor, client_ids: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Top-1 retrieval accuracy + random baseline + normalized lift.
 
-    Returns 0 when no positive pairs exist in the batch.
+    - ``infonce_acc``: fraction of anchors whose nearest neighbour (excluding
+      self) belongs to the same client.
+    - ``infonce_acc_random``: expected accuracy of picking uniformly at
+      random among the ``B-1`` non-self candidates, averaged over anchors.
+      Per anchor it equals ``(positives_in_batch) / (B - 1)`` which, with
+      ``k`` windows per client, simplifies to ``(k-1)/(B-1)``.
+    - ``infonce_lift``: ``(acc - acc_random) / (1 - acc_random)`` — 0 means
+      no better than chance, 1 means perfect retrieval.
+
+    All metrics are 0 when no positive pairs exist in the batch.
     """
-    if z.size(0) < 2:
-        return torch.tensor(0.0, device=z.device)
+    zero = torch.tensor(0.0, device=z.device)
+    out = {"infonce_acc": zero, "infonce_acc_random": zero, "infonce_lift": zero}
+    B = z.size(0)
+    if B < 2:
+        return out
+
+    pos_mask = (client_ids.unsqueeze(0) == client_ids.unsqueeze(1))
+    pos_mask.fill_diagonal_(False)
+    pos_exists = pos_mask.any(dim=1)
+    if not pos_exists.any():
+        return out
+
     sim = z @ z.t()
     sim.fill_diagonal_(float("-inf"))
     nn_idx = sim.argmax(dim=1)
     correct = (client_ids[nn_idx] == client_ids).float()
-    # Mask out rows that have no positive in batch (otherwise correct=False is unfair)
-    pos_exists = (client_ids.unsqueeze(0) == client_ids.unsqueeze(1)).fill_diagonal_(False).any(dim=1)
-    if not pos_exists.any():
-        return torch.tensor(0.0, device=z.device)
-    return (correct * pos_exists.float()).sum() / pos_exists.float().sum()
+
+    valid = pos_exists.float()
+    n_valid = valid.sum()
+    acc = (correct * valid).sum() / n_valid
+
+    # Per-anchor random baseline: positives / (B-1), averaged over valid anchors.
+    pos_count = pos_mask.sum(dim=1).float()
+    acc_random = (pos_count / (B - 1) * valid).sum() / n_valid
+
+    denom = (1.0 - acc_random).clamp(min=1e-8)
+    lift = (acc - acc_random) / denom
+
+    return {"infonce_acc": acc, "infonce_acc_random": acc_random, "infonce_lift": lift}
 
 
 def combined_pretrain_loss(
@@ -234,7 +262,7 @@ def combined_pretrain_loss(
         "loss": total,
         "loss_mtm": l_mtm.detach(),
         "loss_contrastive": l_contrastive.detach(),
-        "mtm_breakdown": mtm_breakdown,
+        "mtm_breakdown": mtm_breakdown, # mtm per ogni singolo campo.
     }
 
 

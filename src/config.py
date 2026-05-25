@@ -63,7 +63,7 @@ class TrainingConfig:
     clients_per_batch: int = 8
     windows_per_pair: int = 2
 
-    epochs: int = 20
+    epochs: int = 30
     mask_prob: float = 0.15
     contrastive_weight: float = 0.5
     lr: float = 3e-4

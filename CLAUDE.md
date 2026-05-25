@@ -124,7 +124,9 @@ CSV columns: `client_id, timestamp, importo, saldo_post, merchant, mcc, canale, 
 | `loss`            | total loss = MTM + λ·InfoNCE                                  |
 | `loss_mtm`        | masked-token-modeling loss (averaged over fields with masked positions) |
 | `loss_contrastive`| InfoNCE                                                       |
-| `infonce_acc`     | top-1 retrieval accuracy in-batch (`info_nce_accuracy` in `src/loss.py`) |
+| `infonce_acc`     | top-1 retrieval accuracy in-batch (`info_nce_metrics` in `src/loss.py`) |
+| `infonce_acc_random` | random baseline `(k-1)/(B-1)` averaged over anchors (same helper) |
+| `infonce_lift`    | normalized lift `(acc - acc_random) / (1 - acc_random)` (same helper) |
 | `temperature`     | learnable temperature of the contrastive head                 |
 | `grad_norm`       | total grad norm before clipping                               |
 | `mtm_breakdown`   | dict `{cat_<name>: CE, num_<name>: smoothL1}` per masked field |
