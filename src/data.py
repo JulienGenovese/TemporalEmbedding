@@ -11,7 +11,6 @@ pairs for the InfoNCE contrastive head.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -23,10 +22,7 @@ from .encoder import (
     FeatureSpec, HighCardCategoricalFeature, NumericFeature,
 )
 
-from .config import FEATURE_COLS, DataConfig
-
-if TYPE_CHECKING:
-    from .config import TrainingConfig
+from .config import FEATURE_COLS, DataConfig, TrainingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +52,7 @@ class TransactionDataset(Dataset):
         self.feature_cols = list(feature_cols)
         self.seq_len = seq_len # quante transazioni per finestra
         self.windows_per_client = windows_per_client # quante finestre per ogni cliente
+        self._seed = seed
         self._rng = np.random.default_rng(seed)
 
         # Resolve per-feature numpy dtype from the source DataFrame.
@@ -76,11 +73,18 @@ class TransactionDataset(Dataset):
             else:
                 raise TypeError(f"Unsupported dtype for column '{col}': {s.dtype}")
 
-        # Pre-compute per-client field arrays once
+        # Pre-compute per-client field arrays once.
+        # `client_id` is a factorized integer code (a per-client counter), so
+        # non-integer ids (e.g. strings) work too; only ID *equality* matters
+        # downstream (InfoNCE positive mask in src/loss.py).
         self.clients: list[dict[str, np.ndarray | int]] = []
-        for cid, g in df.sort_values([client_col, timestamp_col]).groupby(client_col):
+        self.client_id_lookup: dict[int, object] = {}
+        for code, (cid, g) in enumerate(
+            df.sort_values([client_col, timestamp_col]).groupby(client_col)
+        ):
+            self.client_id_lookup[code] = cid
             entry: dict[str, np.ndarray | int] = {
-                "client_id": int(cid),
+                "client_id": code,
                 "n":         len(g),
                 "timestamp": g[timestamp_col].to_numpy(np.int64, copy=True),
             }
@@ -94,24 +98,40 @@ class TransactionDataset(Dataset):
                     entry[col] = g[col].to_numpy(self._col_dtypes[col], copy=True)
             self.clients.append(entry)
 
-        # Flat index: (client_idx, _) — start position is sampled at fetch time
-        self._index: list[int] = [
-            ci for ci in range(len(self.clients)) for _ in range(windows_per_client)
+        # Flat index: (client_idx, slot). The slot selects a disjoint bucket of
+        # the start range in __getitem__, so distinct slots → distinct,
+        # non-overlapping windows (see PairedClientBatchSampler).
+        self._index: list[tuple[int, int]] = [
+            (ci, slot)
+            for ci in range(len(self.clients))
+            for slot in range(windows_per_client)
         ]
 
     def __len__(self) -> int:
         return len(self._index)
 
     def __getitem__(self, idx: int) -> tuple[dict[str, torch.Tensor], int]:
-        ci = self._index[idx]
+        # return the client + window slot associated to the index
+        ci, slot = self._index[idx]
+        # return the features associated to the cliente
         c = self.clients[ci]
+
         T = self.seq_len
         n = int(c["n"])
 
         if n <= T:
             start, length = 0, n
         else:
-            start = int(self._rng.integers(0, n - T + 1))
+            # Partition the start range [0, R) into disjoint buckets, one per
+            # slot, and sample within this slot's bucket. Distinct slots land in
+            # distinct buckets → distinct, non-overlapping windows (the sampler
+            # guarantees R ≥ windows_per_client for eligible clients).
+            R = n - T + 1
+            k = min(self.windows_per_client, R)
+            b = slot % k
+            lo = (b * R) // k # lower bound
+            hi = max(lo + 1, ((b + 1) * R) // k) # higher bound
+            start = int(self._rng.integers(lo, hi))
             length = T
         end = start + length
         pad = T - length
@@ -180,13 +200,16 @@ class PairedClientBatchSampler(Sampler[list[int]]):
 
         # Map client_idx → list of dataset indices that belong to it
         self._by_client: dict[int, list[int]] = {}
-        for di, ci in enumerate(dataset._index):
+        for di, (ci, _slot) in enumerate(dataset._index):
             self._by_client.setdefault(ci, []).append(di)
 
         # Escludi clienti con troppo poche transazioni per produrre
-        # `windows_per_pair` finestre con contenuto distinto.
-        # Start ∈ [0, n - seq_len] → start distinti = max(1, n - seq_len + 1).
-        min_transactions = dataset.seq_len + windows_per_pair - 1
+        # `windows_per_client` finestre con contenuto distinto.
+        # Start ∈ [0, n - seq_len] → start distinti R = n - seq_len + 1.
+        # Richiediamo R ≥ windows_per_client così che ogni slot abbia il proprio
+        # bucket disgiunto e qualunque coppia di slot distinti dia finestre
+        # distinte (vedi TransactionDataset.__getitem__).
+        min_transactions = dataset.seq_len + dataset.windows_per_client - 1
         self._by_client = {
             ci: idxs for ci, idxs in self._by_client.items()
             if int(dataset.clients[ci]["n"]) >= min_transactions
@@ -194,7 +217,8 @@ class PairedClientBatchSampler(Sampler[list[int]]):
         if not self._by_client:
             raise ValueError(
                 f"No clients have ≥{min_transactions} transactions "
-                f"(seq_len={dataset.seq_len}, windows_per_pair={windows_per_pair})"
+                f"(seq_len={dataset.seq_len}, "
+                f"windows_per_client={dataset.windows_per_client})"
             )
 
     def __iter__(self):
@@ -229,6 +253,17 @@ def collate(items: list[tuple[dict[str, torch.Tensor], int]]):
     keys = samples[0].keys()
     batch = {k: torch.stack([s[k] for s in samples], dim=0) for k in keys}
     return batch, torch.tensor(client_ids, dtype=torch.long)
+
+
+def _worker_init(worker_id: int) -> None:
+    """Re-seed each DataLoader worker's RNG so num_workers>0 stays safe.
+
+    Without this every forked worker would inherit an identical ``_rng`` and
+    emit correlated samples. No-op when ``num_workers=0``.
+    """
+    info = torch.utils.data.get_worker_info()
+    if info is not None:
+        info.dataset._rng = np.random.default_rng(info.dataset._seed + worker_id)
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +345,10 @@ class DataModule:
     def _build_loader(self, df: pd.DataFrame, tag: str) -> DataLoader:
         dataset = self._build_dataset(df, tag=tag)
         sampler = self._build_sampler(dataset)
-        loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate)
+        loader = DataLoader(
+            dataset, batch_sampler=sampler, collate_fn=collate,
+            worker_init_fn=_worker_init,
+        )
         logger.info(
             "{} loader ready: {} batches/epoch, batch size {} "
             "({} clients × {} windows)",
