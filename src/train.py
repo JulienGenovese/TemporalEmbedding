@@ -134,7 +134,7 @@ class Trainer:
         Numeric targets are normalised (clip → log1p → z-score) so the
         smooth-L1 term lives on the same scale as the encoder input and
         the categorical cross-entropy, instead of being dominated by the
-        raw euro magnitudes of ``importo``/``saldo_post``.
+        raw euro magnitudes of ``importo``.
         """
         pad_mask = batch.get("padding_mask")
         targets: dict[str, torch.Tensor] = {}

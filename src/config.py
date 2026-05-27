@@ -8,8 +8,7 @@ from pathlib import Path
 
 # Columns that ARE embedded by the TransactionEncoder.
 FEATURE_COLS: list[str] = [
-    "importo", "saldo_post", "merchant", "mcc",
-    "canale", "macro_tipo", "sotto_tipo", "divisa",
+    "importo", "merchant", "mcc", "macro_tipo",
 ]
 
 

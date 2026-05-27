@@ -1,39 +1,55 @@
-"""Generate a small synthetic transaction dataset for CPU smoke-testing.
+"""Genera un piccolo dataset sintetico di transazioni per smoke-test su CPU.
 
-Deliberately simple, but with enough structure for the model to actually learn:
+Volutamente semplice, ma con abbastanza struttura perché il modello impari
+davvero qualcosa:
 
-  * **Client clusters** — every client belongs to one of a few *types* that
-    spend at different hours, in different amounts, on different merchants
-    (plus a different salary). Clear, separable clusters for the contrastive
-    head, and a real temporal pattern for the time-aware encoder.
-  * **Per-client fingerprint** — within its type, each client favours a stable
-    merchant subset and has its own typical spend level.
-  * **Coherent merchant→MCC mapping** — categorical fields are correlated, so
-    the MTM head sees signal instead of noise.
-  * **Temporal patterns** — daily rhythm (cluster-specific spending hours) plus
-    a recurring monthly salary on a fixed per-client day.
+  * **Cluster di clienti** — ogni cliente appartiene a uno di pochi *tipi* che
+    spendono a ore diverse, per importi diversi, presso esercenti diversi.
+    Cluster netti e separabili per la testa contrastiva (InfoNCE) e un vero
+    pattern temporale per l'encoder time-aware.
+  * **Impronta per-cliente** — all'interno del suo tipo, ogni cliente predilige
+    un sottoinsieme stabile di esercenti e ha un proprio livello di spesa tipico.
+  * **Mappatura coerente esercente→MCC** — i campi categorici sono correlati
+    (l'esercente predice gli altri), così la testa MTM vede segnale e non rumore.
+  * **Pattern temporali** — un ritmo di spesa giornaliero specifico del cluster.
 
-A single ``noise_level`` knob (0.0 = clean/separable, 1.0 = very noisy) tunes how
-hard the pre-training task is along all three axes at once:
+COME VIENE GENERATO IL DATASET (vista d'insieme delle distribuzioni usate)
 
-  * **MTM** — the merchant→category mapping stops being deterministic (mcc /
-    sotto_tipo / canale / macro_tipo get occasional random values), so the head
-    must model a distribution instead of memorising a lookup table.
-  * **InfoNCE** — clusters become less separable (cross-cluster merchant overlap,
-    off-pattern transactions, larger intra-client variance), so client identity
-    is harder to recover.
-  * **Temporal** — salary day jitters, some months are skipped, the salary amount
-    varies more, and occasional refunds/reversals appear.
+  1. *Quante transazioni per cliente?*  Una **Dirichlet(α=1.5)** genera i pesi
+     dei clienti e una **Multinomiale** distribuisce le N transazioni su quei
+     pesi. La Dirichlet con α<1 (qui 1.5, leggermente >1 ma comunque "morbida")
+     produce pesi disomogenei → alcuni clienti molto attivi, molti poco attivi,
+     come nella realtà (distribuzione a coda lunga del numero di transazioni).
+  2. *A che tipo appartiene il cliente?*  Estrazione **categorica** sui
+     ``_TYPE_WEIGHTS`` (quote dei cluster).
+  3. *Quando avvengono le transazioni?*  I gap fra transazioni consecutive sono
+     **Esponenziali** (processo di arrivo tipo Poisson → tempi di attesa
+     esponenziali); l'ora del giorno è **categorica** pesata da una **gaussiana**
+     centrata sull'ora di punta del cluster; i secondi sono **uniformi**.
+  4. *Di che importo?*  L'importo è **Log-normale** (sempre positivo, asimmetrico
+     a destra, code lunghe) — la scelta classica per modellare importi/redditi.
+  5. *Quale esercente / categoria?*  Estrazioni **categoriche** dal pool del
+     cluster, con una mappa fissa esercente→(mcc, macro_tipo).
 
-``noise_level=0.0`` reproduces the original clean behaviour exactly.
+Una sola manopola ``noise_level`` (0.0 = pulito/separabile, 1.0 = molto rumoroso)
+regola contemporaneamente la difficoltà del pre-training sui tre assi:
 
-Produces ``data/transactions.csv`` with every column expected by the
-``DEFAULT_FEATURES`` schema in :mod:`src.model`:
+  * **MTM** — la mappa esercente→categoria smette di essere deterministica (mcc /
+    macro_tipo prendono ogni tanto valori casuali), quindi la testa deve
+    modellare una *distribuzione* invece di memorizzare una lookup table.
+  * **InfoNCE** — i cluster diventano meno separabili (sovrapposizione di
+    esercenti fra cluster, transazioni fuori-pattern, maggiore varianza
+    intra-cliente), quindi l'identità del cliente è più difficile da recuperare.
+  * **Temporale** — compaiono occasionali rimborsi/storni poco dopo un addebito.
 
-    client_id, timestamp, importo, saldo_post, merchant,
-    mcc, canale, macro_tipo, sotto_tipo, divisa
+``noise_level=0.0`` riproduce esattamente il comportamento pulito originale.
 
-Usage:
+Produce ``data/transactions.csv`` con tutte le colonne attese dallo schema
+``DEFAULT_FEATURES`` in :mod:`src.model`:
+
+    client_id, timestamp, importo, merchant, mcc, macro_tipo
+
+Uso:
     uv run python -m src.make_dataset
 """
 
@@ -46,32 +62,38 @@ import pandas as pd
 
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Configurazione
 # ---------------------------------------------------------------------------
 
 N_TRANSACTIONS = 400_000
 N_CLIENTS = 4_000
 MIN_N_TRANSACTIONS_PER_CLIENT = 50
-NOISE_LEVEL = 0.3                  # default difficulty knob (0=clean … 1=very noisy)
+NOISE_LEVEL = 0.3                  # manopola di difficoltà di default (0=pulito … 1=molto rumoroso)
 TS_BASE = 1_577_836_800            # 2020-01-01 00:00 UTC
-TS_RANGE = 4 * 365 * 24 * 3600     # ~4 years in seconds
+TS_RANGE = 4 * 365 * 24 * 3600     # ~4 anni in secondi
 DAY = 86_400
-MONTH = 30 * DAY
 
 
 def _hours(peak: int, width: float = 4.0) -> np.ndarray:
-    """A normalised 24-hour weight curve peaked around ``peak`` o'clock."""
+    """Curva di pesi sulle 24 ore, a forma di **gaussiana** centrata su ``peak``.
+
+    Modelliamo l'ora del giorno con una campana gaussiana perché il consumo reale
+    è concentrato attorno a un'ora di punta e cala gradualmente ai lati (non è né
+    uniforme né a gradino). ``width`` è la deviazione standard in ore. Aggiungiamo
+    un fondo costante (+0.02) così nessuna ora ha probabilità nulla, poi
+    normalizziamo per ottenere una distribuzione di probabilità valida (somma 1).
+    """
     h = np.arange(24)
     w = np.exp(-0.5 * ((h - peak) / width) ** 2) + 0.02
     return w / w.sum()
 
 
-HOURS_MORNING = _hours(9)      # commuters / utilities
-HOURS_MIDDAY  = _hours(13)     # families doing groceries
-HOURS_EVENING = _hours(20)     # young / dining / shopping
+HOURS_MORNING = _hours(9)      # pendolari / utenze
+HOURS_MIDDAY  = _hours(13)     # famiglie che fanno la spesa
+HOURS_EVENING = _hours(20)     # giovani / cene / shopping
 
 
-# Merchant themes — used to give each client type a distinct merchant pool.
+# Temi di esercenti — servono a dare a ogni tipo di cliente un pool distinto.
 GROCERIES = ["Esselunga", "Conad", "Carrefour", "Lidl", "Aldi", "Coop"]
 SHOPPING  = ["Amazon", "Walmart", "IKEA", "Apple", "Zara", "H&M",
              "Decathlon", "Mediaworld", "Unieuro"]
@@ -81,43 +103,64 @@ PAYMENTS  = ["PayPal", "Satispay", "Bancomat", "Netflix", "Spotify", "Starbucks"
 MERCHANT_POOL = GROCERIES + SHOPPING + TRAVEL + UTILITIES + PAYMENTS
 
 
-# Each merchant gets a fixed (mcc, macro_tipo, sotto_tipo, canale) profile so
-# the categorical fields are correlated (the merchant predicts the rest). Values
-# stay inside the embedding vocab ranges (0 = padding).
+# A ogni esercente assegniamo un profilo fisso (mcc, macro_tipo) così i campi
+# categorici sono correlati (l'esercente predice il resto). I valori restano
+# dentro i range del vocabolario degli embedding (0 = padding). ``macro_tipo``
+# copre un insieme più ampio di categorie grossolane (1..24).
+# Estrazione **uniforme discreta** (rng.integers): senza informazioni a priori
+# sull'MCC "giusto", ogni codice in-vocab è a priori equiprobabile; ciò che conta
+# è che la mappa sia *deterministica e stabile* per esercente, non come è scelta.
+# Il seed fisso (42) garantisce che il profilo sia identico fra esecuzioni.
 _rng0 = np.random.default_rng(42)
 MERCHANT_PROFILE: dict[str, dict[str, int]] = {
     m: {
         "mcc":        int(_rng0.integers(1, 800)),
-        "macro_tipo": int(_rng0.integers(1, 8)),
-        "sotto_tipo": int(_rng0.integers(1, 40)),
-        "canale":     int(_rng0.integers(1, 10)),
+        "macro_tipo": int(_rng0.integers(1, 24)),
     }
     for m in MERCHANT_POOL
 }
 
 
-# Client clusters: each spends at different hours, in different amounts, on a
-# different merchant pool, with a different salary. ``weight`` is the share of
-# clients in the cluster.
+# Cluster di clienti: ognuno spende a ore diverse, per importi diversi, su un
+# pool di esercenti diverso. ``weight`` è la quota di clienti nel cluster.
+#   - hours:      curva oraria (gaussiana) del cluster
+#   - amount_mu:  media (in spazio log) della log-normale degli importi
+#   - gap_days:   media (in giorni) dell'esponenziale dei tempi fra transazioni
 CLIENT_TYPES: list[dict] = [
-    {"name": "famiglia_giorno",  "weight": 0.35, "hours": HOURS_MIDDAY,
-     "amount_mu": 3.4, "gap_days": 1.5, "salary_mu": 7.7,
+    {"name": "famiglia_giorno",
+     "weight": 0.35,
+     "hours": HOURS_MIDDAY,
+     "amount_mu": 3.4,
+     "gap_days": 1.5,
      "merchants": GROCERIES + PAYMENTS + UTILITIES},
-    {"name": "giovane_sera",     "weight": 0.30, "hours": HOURS_EVENING,
-     "amount_mu": 2.8, "gap_days": 2.0, "salary_mu": 7.2,
+
+    {"name": "giovane_sera",
+     "weight": 0.30,
+     "hours": HOURS_EVENING,
+     "amount_mu": 2.8,
+     "gap_days": 2.0,
      "merchants": PAYMENTS + SHOPPING + ["Starbucks"]},
-    {"name": "altospendente",    "weight": 0.20, "hours": HOURS_EVENING,
-     "amount_mu": 4.2, "gap_days": 3.0, "salary_mu": 8.5,
+
+    {"name": "altospendente",
+     "weight": 0.20,
+     "hours": HOURS_EVENING,
+     "amount_mu": 4.2,
+     "gap_days": 3.0,
      "merchants": SHOPPING + TRAVEL},
-    {"name": "mattiniero_utenze","weight": 0.15, "hours": HOURS_MORNING,
-     "amount_mu": 3.3, "gap_days": 2.5, "salary_mu": 7.9,
+
+    {"name": "mattiniero_utenze",
+     "weight": 0.15,
+     "hours": HOURS_MORNING,
+     "amount_mu": 3.3,
+     "gap_days": 2.5,
      "merchants": UTILITIES + GROCERIES},
 ]
 _TYPE_WEIGHTS = np.array([t["weight"] for t in CLIENT_TYPES])
 _TYPE_WEIGHTS = _TYPE_WEIGHTS / _TYPE_WEIGHTS.sum()
 
-# Population-average spend level — used for "off-pattern" transactions that don't
-# follow the client's own fingerprint (adds intra-client variance under noise).
+# Livello di spesa medio della popolazione — usato per le transazioni
+# "fuori-pattern" che non seguono l'impronta del cliente (aggiunge varianza
+# intra-cliente quando il rumore cresce).
 _GLOBAL_AMOUNT_MU = float(np.mean([t["amount_mu"] for t in CLIENT_TYPES]))
 _UNIFORM_HOURS = np.full(24, 1.0 / 24)
 
@@ -125,7 +168,7 @@ DEFAULT_OUT = Path("data") / "transactions.csv"
 
 
 # ---------------------------------------------------------------------------
-# Generator
+# Generatore
 # ---------------------------------------------------------------------------
 
 def generate(
@@ -135,25 +178,36 @@ def generate(
     seed: int = 0,
     noise_level: float = NOISE_LEVEL,
 ) -> Path:
-    """Generate the synthetic CSV.
+    """Genera il CSV sintetico.
 
-    ``noise_level`` (0.0–1.0) scales every noise source linearly: 0.0 reproduces
-    the original clean/separable dataset, higher values make the MTM, InfoNCE and
-    temporal tasks progressively harder.
+    ``noise_level`` (0.0–1.0) scala linearmente ogni sorgente di rumore: 0.0
+    riproduce il dataset pulito/separabile originale, valori più alti rendono i
+    task MTM, InfoNCE e temporale progressivamente più difficili.
+
+    Passi:
+      1. Quante transazioni a testa → **Dirichlet** + **Multinomiale**.
+      2. Tipo (cluster) di ogni cliente → estrazione **categorica**.
+      3. Per ogni cliente, genera le sue transazioni (vedi ``_generate_client``).
     """
     noise_level = float(np.clip(noise_level, 0.0, 1.0))
     rng = np.random.default_rng(seed)
 
-    # Distribute transactions across clients with a mild Zipf-like skew.
+    # --- Quante transazioni per cliente ---
+    # Dirichlet(α=1.5) → un vettore di pesi che somma a 1, con disomogeneità
+    # controllata (α più piccolo ⇒ più disomogeneo). La Multinomiale distribuisce
+    # poi le n_transactions su quei pesi: il risultato è una coda lunga realistica
+    # (pochi clienti molto attivi, molti poco attivi).
     weights = rng.dirichlet(np.ones(n_clients) * 1.5)
     counts = rng.multinomial(n_transactions, weights)
+    # Imponiamo un minimo per cliente, poi riaggiustiamo per conservare il totale
+    # esatto (togliamo dai più grandi / aggiungiamo ai più piccoli).
     counts = np.clip(counts, MIN_N_TRANSACTIONS_PER_CLIENT, None)
     while counts.sum() > n_transactions:
         counts[counts.argmax()] -= 1
     while counts.sum() < n_transactions:
         counts[counts.argmin()] += 1
 
-    # Assign each client to a cluster.
+    # --- Assegna ogni cliente a un cluster (estrazione categorica sui pesi) ---
     type_idx = rng.choice(len(CLIENT_TYPES), size=n_clients, p=_TYPE_WEIGHTS)
 
     rows = []
@@ -162,8 +216,8 @@ def generate(
         rows.extend(_generate_client(client_id, int(n), ctype, rng, noise_level))
 
     df = pd.DataFrame(rows, columns=[
-        "client_id", "timestamp", "importo", "saldo_post", "merchant",
-        "mcc", "canale", "macro_tipo", "sotto_tipo", "divisa",
+        "client_id", "timestamp", "importo", "merchant",
+        "mcc", "macro_tipo",
     ])
     df = df.sort_values(["client_id", "timestamp"]).reset_index(drop=True)
 
@@ -180,123 +234,191 @@ def generate(
     return out_path
 
 
-def _generate_client(client_id: int, n_tx: int, ctype: dict,
-                     rng: np.random.Generator, noise_level: float = 0.0) -> list[dict]:
-    """Generate ``n_tx`` transactions for one client of cluster ``ctype``.
+def _client_fingerprint(ctype: dict, rng: np.random.Generator,
+                        noise_level: float) -> tuple[np.ndarray, float]:
+    """Impronta del singolo cliente all'interno del suo cluster.
 
-    Temporal patterns: a cluster-specific daily rhythm on spending plus a
-    recurring monthly salary on a fixed day-of-month. ``noise_level`` (0–1)
-    scales the cross-cluster merchant overlap, off-pattern transactions, larger
-    fingerprint variance, salary irregularity and occasional refunds.
+    Restituisce ``(fav_merchants, amount_mu)``: un sottoinsieme stabile di
+    esercenti preferiti e un livello di spesa tipico.
+
+    Distribuzioni usate:
+      * ``fav_merchants`` — quanti preferiti: **uniforme discreta** in [3,7]
+        (``rng.integers(3, 8)``); *quali*: campionamento **uniforme senza
+        rimpiazzo** dal pool del cluster (``replace=False``), così i preferiti
+        sono distinti.
+      * ``amount_mu`` — la media (in spazio log) della log-normale degli importi
+        è il valore del cluster più una perturbazione **gaussiana** N(0, σ). La
+        σ cresce con il rumore (0.3 → 0.7), allargando la dispersione *fra*
+        clienti dello stesso tipo: con più rumore due clienti dello stesso
+        cluster si somigliano meno (InfoNCE più difficile).
     """
-    # Per-client fingerprint within its cluster. A larger noise_level widens the
-    # intra-cluster spread, so clients of the same type look less alike.
     pool = ctype["merchants"]
     fav_merchants = rng.choice(pool, size=min(rng.integers(3, 8), len(pool)), replace=False)
     amount_mu = ctype["amount_mu"] + rng.normal(0, 0.3 + 0.4 * noise_level)
-    balance = float(rng.lognormal(8.0, 0.8))
+    return fav_merchants, amount_mu
 
-    # Cluster daily rhythm, blended toward uniform as noise rises (fuzzier hours).
+
+def _generate_timestamps(n_tx: int, ctype: dict, rng: np.random.Generator,
+                         noise_level: float) -> np.ndarray:
+    """Timestamp Unix in secondi (giorni · ore · secondi) per un cliente.
+
+    Costruiamo il timestamp da tre componenti, ciascuna con la sua distribuzione:
+
+      * **GIORNI — gap esponenziali.** I tempi di attesa fra transazioni
+        consecutive seguono una **Esponenziale** con media ``gap_days`` (in
+        giorni). È la scelta naturale per gli "inter-arrival time" di un processo
+        di arrivo tipo Poisson (eventi senza memoria); produce molte transazioni
+        ravvicinate e qualche pausa lunga, come la spesa reale. Si parte da un
+        istante iniziale **uniforme** nei primi ~2 anni e si accumulano i gap
+        (``cumsum``) → i timestamp sono crescenti per costruzione.
+      * **ORE — categorica pesata da una gaussiana.** L'ora del giorno è estratta
+        da una categorica su {0..23} con pesi ``hours_p``, cioè la campana
+        gaussiana del cluster (vedi ``_hours``). Con il rumore mescoliamo questa
+        campana verso l'**uniforme** (peso 0.4·noise): le ore diventano più
+        sfocate e i cluster meno riconoscibili dal solo orario.
+      * **SECONDI — uniformi.** Entro l'ora, i secondi sono **uniformi** in
+        [0, 3600): non c'è un pattern al secondo, quindi l'uniforme è corretta.
+    """
+    # Mix campana-del-cluster ↔ uniforme: a noise=0 è pura campana, a noise=1
+    # pesa l'uniforme per il 40%. Rinormalizziamo per riavere una distribuzione.
     hours_p = (1.0 - 0.4 * noise_level) * ctype["hours"] + (0.4 * noise_level) * _UNIFORM_HOURS
     hours_p = hours_p / hours_p.sum()
 
-    p_offpattern = 0.2 * noise_level    # transaction ignores the client fingerprint
-    p_global_merchant = 0.3 * noise_level  # merchant drawn from the whole pool
-    p_refund = 0.05 * noise_level       # debit immediately followed by a partial refund
+    start = TS_BASE + int(rng.integers(0, TS_RANGE // 2))          # inizio uniforme
+    gaps = rng.exponential(scale=ctype["gap_days"] * DAY, size=n_tx).astype(np.int64)  # gap esponenziali
+    days = (start + np.cumsum(gaps)) // DAY                        # giorni (cumulati)
+    hours = rng.choice(24, size=n_tx, p=hours_p)                   # ora ~ campana del cluster
+    secs = rng.integers(0, 3600, size=n_tx)                        # secondi uniformi nell'ora
+    return days * DAY + hours * 3600 + secs
 
-    # --- spending stream: cluster-specific cadence + daytime hour ---
-    start = TS_BASE + int(rng.integers(0, TS_RANGE // 2))
-    gaps = rng.exponential(scale=ctype["gap_days"] * DAY, size=n_tx).astype(np.int64)
-    days = (start + np.cumsum(gaps)) // DAY
-    hours = rng.choice(24, size=n_tx, p=hours_p)            # cluster's daily rhythm
-    secs = rng.integers(0, 3600, size=n_tx)
-    timestamps = days * DAY + hours * 3600 + secs
+
+def _generate_amount(mu: float, rng: np.random.Generator) -> tuple[float, int]:
+    """Un importo con segno, da una **log-normale**.
+
+    Restituisce ``(amount, sign)`` con ~85% addebiti (spese, ``sign < 0``) e
+    ~15% accrediti (``sign > 0``) — il segno è una **Bernoulli** (p=0.85).
+
+    Perché log-normale: gli importi sono sempre positivi, fortemente asimmetrici
+    a destra e con code lunghe (tante piccole spese, poche molto grandi). Una
+    variabile X = exp(N(μ, σ²)) cattura esattamente questo: ``mu`` è la media nello
+    spazio logaritmico (livello di spesa tipico del cluster/cliente), ``sigma``
+    l'ampiezza. Il segno viene applicato dopo: l'importo è |X| con segno.
+    """
+    sign = -1 if rng.random() < 0.85 else 1
+    return sign * float(rng.lognormal(mean=mu, sigma=1.0)), sign
+
+
+def _generate_merchant(off: bool, pool: list, fav_merchants: np.ndarray,
+                       rng: np.random.Generator, p_global_merchant: float) -> str:
+    """Sceglie l'esercente di una transazione (estrazioni **categoriche/uniformi**).
+
+    Logica gerarchica:
+      * Se la transazione è *fuori-pattern* (``off``) oppure scatta un'estrazione
+        "globale" (con prob. ``p_global_merchant``, che cresce col rumore), si
+        pesca **uniformemente da tutto** ``MERCHANT_POOL`` → sovrapposizione fra
+        cluster, identità del cliente più difficile (InfoNCE).
+      * Altrimenti il cliente segue la sua impronta: con prob. 0.7 sceglie dai
+        propri preferiti ``fav_merchants``, con prob. 0.3 da tutto il pool del
+        cluster — sempre estrazioni **uniformi** sull'insieme scelto. Lo split
+        0.7/0.3 è una **Bernoulli** che dà concentrazione sui preferiti ma non
+        totale rigidità.
+    """
+    if off or rng.random() < p_global_merchant:
+        return str(rng.choice(MERCHANT_POOL))               # sovrapposizione fra cluster
+    return (str(rng.choice(fav_merchants)) if rng.random() < 0.7
+            else str(rng.choice(pool)))
+
+
+def _generate_refund(ts: int, amount: float,
+                     rng: np.random.Generator) -> tuple[int, float]:
+    """Un rimborso/storno parziale di un addebito.
+
+    Restituisce ``(refund_ts, refund_amt)``: un accredito (``amount > 0``) 1–2
+    giorni dopo l'addebito originale, per il 30–100% del suo valore.
+
+    Distribuzioni:
+      * ritardo in giorni — **uniforme discreta** in {1, 2} (``integers(1, 3)``);
+      * frazione rimborsata — **uniforme continua** in [0.3, 1.0]. Non avendo un
+        motivo per privilegiare un rimborso parziale specifico, l'uniforme è la
+        scelta neutra. Il segno si inverte (addebito<0 → accredito>0).
+    """
+    refund_ts = int(ts) + int(rng.integers(1, 3) * DAY)
+    refund_amt = -amount * float(rng.uniform(0.3, 1.0))     # amount<0 (addebito) → accredito
+    return refund_ts, refund_amt
+
+
+def _generate_client(client_id: int,
+                     n_tx: int,
+                     ctype: dict,
+                     rng: np.random.Generator, noise_level: float = 0.0) -> list[dict]:
+    """Genera ``n_tx`` transazioni per un cliente del cluster ``ctype``.
+
+    Orchestra i generatori per-componente (:func:`_client_fingerprint`,
+    :func:`_generate_timestamps`, :func:`_generate_amount`,
+    :func:`_generate_merchant`, :func:`_generate_refund`). ``noise_level`` (0–1)
+    scala la sovrapposizione di esercenti fra cluster, le transazioni
+    fuori-pattern, la varianza dell'impronta e i rimborsi occasionali.
+
+    Per ogni transazione le probabilità "di rumore" sono **Bernoulli** la cui p
+    cresce linearmente col ``noise_level`` (a noise=0 sono tutte spente, quindi il
+    dataset è pulito e perfettamente separabile).
+    """
+    pool = ctype["merchants"]
+    fav_merchants, amount_mu = _client_fingerprint(ctype, rng, noise_level)
+    timestamps = _generate_timestamps(n_tx, ctype, rng, noise_level)
+
+    p_offpattern = 0.2 * noise_level       # la transazione ignora l'impronta del cliente
+    p_global_merchant = 0.3 * noise_level  # esercente pescato da tutto il pool
+    p_refund = 0.05 * noise_level          # addebito seguito da un rimborso parziale
 
     rows: list[dict] = []
     for ts in timestamps:
         off = rng.random() < p_offpattern
-        mu = _GLOBAL_AMOUNT_MU if off else amount_mu        # off-pattern ignores fingerprint
-        sign = -1 if rng.random() < 0.85 else 1             # ~85% spese, ~15% accrediti
-        amount = sign * float(rng.lognormal(mean=mu, sigma=1.0))
-        if off or rng.random() < p_global_merchant:
-            merchant = str(rng.choice(MERCHANT_POOL))       # cross-cluster overlap
-        else:
-            merchant = (str(rng.choice(fav_merchants)) if rng.random() < 0.7
-                        else str(rng.choice(pool)))
+        mu = _GLOBAL_AMOUNT_MU if off else amount_mu        # fuori-pattern: ignora l'impronta
+        amount, sign = _generate_amount(mu, rng)
+        merchant = _generate_merchant(off, pool, fav_merchants, rng, p_global_merchant)
         rows.append(_row(client_id, int(ts), amount, merchant, rng, noise_level))
 
-        # Occasional refund/reversal: a positive credit shortly after a debit,
-        # same merchant, partial amount. Being a credit it never lowers the
-        # balance, so the >=0 invariant in the roll-up below is preserved.
         if sign < 0 and rng.random() < p_refund:
-            refund_ts = int(ts) + int(rng.integers(1, 3) * DAY)
-            refund_amt = -amount * float(rng.uniform(0.3, 1.0))   # amount<0 → credit
+            refund_ts, refund_amt = _generate_refund(ts, amount, rng)
             rows.append(_row(client_id, refund_ts, refund_amt, merchant, rng, noise_level))
 
-    # --- recurring monthly salary; day jitters and some months are skipped ---
-    salary_day = int(rng.integers(1, 28))
-    salary_amt = float(rng.lognormal(ctype["salary_mu"], 0.2))
-    day_jitter = int(round(3 * noise_level))
-    amt_sigma = 0.02 + 0.1 * noise_level
-    first, last = int(timestamps.min()), int(timestamps.max())
-    month_start = (first // MONTH) * MONTH
-    for base in range(month_start, last + MONTH, MONTH):
-        if rng.random() < 0.1 * noise_level:               # skipped paycheck
-            continue
-        day = salary_day
-        if day_jitter:
-            day = int(np.clip(salary_day + rng.integers(-day_jitter, day_jitter + 1), 1, 27))
-        ts = base + day * DAY + 9 * 3600                    # paid ~09:00
-        amt = salary_amt * (1.0 + rng.normal(0, amt_sigma))
-        rows.append(_row(client_id, ts, amt, "Datore", rng, noise_level, mcc=799,
-                         canale=4, macro_tipo=8, sotto_tipo=39))
-
-    # --- sort chronologically and roll up the running balance ---
-    # The balance can never go negative: a spesa is capped at the funds
-    # available, so ``importo`` stays consistent with ``saldo_post`` (which
-    # therefore is always >= 0, as a real account balance).
+    # --- ordina cronologicamente ---
     rows.sort(key=lambda r: r["timestamp"])
-    for r in rows:
-        amount = r["importo"]
-        if balance + amount < 0:
-            amount = -balance              # spend at most what is available
-            r["importo"] = round(amount, 2)
-        balance += amount
-        r["saldo_post"] = round(balance, 2)
     return rows
 
 
 def _row(client_id: int, ts: int, amount: float, merchant: str,
          rng: np.random.Generator, noise_level: float = 0.0, **override: int) -> dict:
-    """Build one transaction row; ``saldo_post`` is filled in later.
+    """Costruisce una riga-transazione.
 
-    With ``noise_level > 0`` the merchant→category mapping is no longer
-    deterministic: each categorical field is occasionally replaced by a random
-    in-vocab value, so the MTM head must model a distribution rather than a
-    lookup table. Fields pinned via ``override`` (e.g. the salary profile) are
-    never perturbed.
+    Con ``noise_level > 0`` la mappa esercente→categoria non è più deterministica:
+    ogni campo categorico viene ogni tanto sostituito da un valore casuale
+    in-vocab, così la testa MTM deve modellare una *distribuzione* invece di una
+    lookup table. I campi fissati via ``override`` non vengono mai perturbati.
+
+    Distribuzione del rumore categorico: una **Bernoulli** (p = ``p_noise`` ·
+    ``noise_level``) decide *se* perturbare; in caso affermativo il nuovo valore è
+    **uniforme discreto** nel range in-vocab [lo, hi). Si noti che ``mcc`` ha
+    p_noise più alto (0.5) di ``macro_tipo`` (0.15): l'MCC, più granulare, è reso
+    più rumoroso della categoria grossolana.
     """
     prof = MERCHANT_PROFILE.get(merchant, {})
 
     def _cat(name: str, default: int, p_noise: float, lo: int, hi: int) -> int:
-        if name in override:                       # pinned value → never perturbed
+        if name in override:                       # valore fissato → mai perturbato
             return override[name]
         if noise_level and rng.random() < p_noise * noise_level:
-            return int(rng.integers(lo, hi))       # random in-vocab (hi exclusive)
+            return int(rng.integers(lo, hi))       # casuale in-vocab (hi escluso)
         return prof.get(name, default)
 
-    p_noneur = 0.03 + 0.15 * noise_level
     return {
         "client_id":  client_id,
         "timestamp":  int(ts),
         "importo":    round(float(amount), 2),
-        "saldo_post": 0.0,
         "merchant":   merchant,
         "mcc":        _cat("mcc",        1, 0.5,  1, 801),
-        "canale":     _cat("canale",     1, 0.3,  1,  11),
-        "macro_tipo": _cat("macro_tipo", 1, 0.15, 1,   9),
-        "sotto_tipo": _cat("sotto_tipo", 1, 0.5,  1,  41),
-        "divisa":     1 if rng.random() < (1.0 - p_noneur) else int(rng.integers(2, 6)),
+        "macro_tipo": _cat("macro_tipo", 1, 0.15, 1,  25),
     }
 
 

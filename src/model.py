@@ -13,9 +13,8 @@ from .sequence_encoder import SequenceTransformer
 from .loss import MTMHead, ContrastiveHead
 
 
-# Default feature schema — 9 field slots:
-#   importo(signed) → 2, saldo_post → 1, merchant(hash) → 1,
-#   mcc/canale/macro_tipo/sotto_tipo/divisa → 5   total = 9
+# Default feature schema — 5 field slots:
+#   importo(signed) → 2, merchant(hash) → 1, mcc/macro_tipo → 2   total = 5
 
 
 
@@ -187,13 +186,9 @@ class EmbeddingModel(nn.Module):
 
 DEFAULT_FEATURES: list[FeatureSpec] = [
     NumericFeature("importo", signed=True),
-    NumericFeature("saldo_post"),
     HighCardCategoricalFeature("merchant"),
     CategoricalFeature("mcc",        801),
-    CategoricalFeature("canale",      11),
-    CategoricalFeature("macro_tipo",   9),
-    CategoricalFeature("sotto_tipo",  41),
-    CategoricalFeature("divisa",       6),
+    CategoricalFeature("macro_tipo",  25),
 ]
 
 
@@ -220,16 +215,12 @@ if __name__ == "__main__":
     batch = {
         # Numeric (float); importo may be negative (signed)
         "importo":    torch.randn(B, T, device=device) * 500,
-        "saldo_post": torch.randn(B, T, device=device) * 1000,
         "delta_t":    torch.abs(torch.randn(B, T, device=device)) * 86400,
         # Merchant (raw IDs — double hash computed internally)
         "merchant":   torch.randint(1, 100_000, (B, T), device=device),
         # Categoricals
         "mcc":        torch.randint(1, 800, (B, T), device=device),
-        "canale":     torch.randint(1, 10,  (B, T), device=device),
-        "macro_tipo": torch.randint(1, 8,   (B, T), device=device),
-        "sotto_tipo": torch.randint(1, 40,  (B, T), device=device),
-        "divisa":     torch.randint(1, 5,   (B, T), device=device),
+        "macro_tipo": torch.randint(1, 24,  (B, T), device=device),
         # Datetime as Unix timestamp (int64); encoder decomposes automatically
         "timestamp":  (torch.randint(0, 126_230_400, (B, T), device=device) + ts_base).long(),
         # Padding mask (last 8 transactions are padded)

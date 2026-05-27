@@ -13,7 +13,7 @@ uv sync
 # Forward-pass smoke test (shape checks only, synthetic in-memory batch)
 uv run python -m src.model
 
-# Generate the synthetic CSV dataset (~10k rows / 100 clients) under data/
+# Generate the synthetic CSV dataset (~400k rows / 4000 clients) under data/
 uv run python -m src.make_dataset
 
 # Full end-to-end pre-training (MTM + InfoNCE) on the CSV — CPU-friendly defaults
@@ -28,7 +28,7 @@ uv run python -m src.<module>
 
 Scripts inside `src/` use relative imports (`from .encoder import ...`), so always invoke them via `python -m src.<name>` rather than `python src/<name>.py`.
 
-`src.train` runs in ~30s on CPU with the default settings (2 epochs × 12 batches × 16 samples) and writes `checkpoints/model_final.pt`.
+`src.train` runs with the default settings (30 epochs × ~400 batches/epoch × 16 samples, with early stopping) and writes `checkpoints/model_final.pt`.
 
 ## Architecture
 
@@ -72,7 +72,7 @@ for feat, enc in zip(self.features, self.encoders):
 
 **Adding a new feature type** = one new dataclass with `build` / `encode` / `n_slots`, zero changes elsewhere.
 
-`TransactionEncoder.n_fields` is computed from the schema and is passed into `FieldTransformer` (which sizes its learnable field-type positional encoding accordingly). The default schema lives in `src/model.py` as `DEFAULT_FEATURES` and produces 9 slots (`importo` signed → 2, `saldo_post` → 1, `merchant` hash → 1, `mcc`/`canale`/`macro_tipo`/`sotto_tipo`/`divisa` → 5). It does **not** include a `DatetimeFeature`: the `timestamp` column is loaded into the batch but consumed only to derive `delta_t`, not embedded.
+`TransactionEncoder.n_fields` is computed from the schema and is passed into `FieldTransformer` (which sizes its learnable field-type positional encoding accordingly). The default schema lives in `src/model.py` as `DEFAULT_FEATURES` and produces 5 slots (`importo` signed → 2, `merchant` hash → 1, `mcc`/`macro_tipo` → 2). It does **not** include a `DatetimeFeature`: the `timestamp` column is loaded into the batch but consumed only to derive `delta_t`, not embedded.
 
 ### Consequence: loss heads track the schema
 
@@ -93,7 +93,7 @@ Adding a new feature: append a spec to `DEFAULT_FEATURES` in `src/model.py`, pro
 ## Synthetic data pipeline (CPU smoke test)
 
 ```
-src/make_dataset.py   ──▶  data/transactions.csv  (10 000 rows, 100 clients)
+src/make_dataset.py   ──▶  data/transactions.csv  (~400k rows, 4000 clients)
                                   │
                                   ▼
 src/data.py           load_dataframe → fit_features (numeric normalizers via
@@ -109,7 +109,7 @@ src/train.py          builds the model with the fitted features, runs the
                       checkpoints/model_final.pt
 ```
 
-CSV columns: `client_id, timestamp, importo, saldo_post, merchant, mcc, canale, macro_tipo, sotto_tipo, divisa`. `merchant` is a string; `data.py` hashes it to an int64 ID via `HighCardCategoricalFeature._to_int` (FNV-1a) before tensorising.
+CSV columns: `client_id, timestamp, importo, merchant, mcc, macro_tipo`. `merchant` is a string; `data.py` hashes it to an int64 ID via `HighCardCategoricalFeature._to_int` (FNV-1a) before tensorising.
 
 `delta_t` is **derived** at load time from per-client `np.diff(timestamp)` — the CSV does not store it.
 
@@ -137,4 +137,4 @@ CSV columns: `client_id, timestamp, importo, saldo_post, merchant, mcc, canale, 
 
 `uv run python -m src.plots --tensorboard` additionally replays the same JSON history into TensorBoard event files under ``runs/<timestamp>/`` via `TensorBoardExporter` (a post-hoc class in `src/plots.py`, no training-loop changes). View with `tensorboard --logdir runs`. Scalars are grouped as `train/*` (per-step), `mtm/*` (per-field), `eval_train/*` and `eval_val/*` (per-epoch).
 
-Note: numeric MTM targets are **normalised** — `Trainer._build_mtm_targets` applies each `NumericFeature.normalizer` (clip → log1p → z-score) so the smooth-L1 term lives on the same scale as the encoder input and the categorical cross-entropy, rather than being dominated by the raw euro magnitudes of `saldo_post`/`importo`.
+Note: numeric MTM targets are **normalised** — `Trainer._build_mtm_targets` applies each `NumericFeature.normalizer` (clip → log1p → z-score) so the smooth-L1 term lives on the same scale as the encoder input and the categorical cross-entropy, rather than being dominated by the raw euro magnitudes of `importo`.
