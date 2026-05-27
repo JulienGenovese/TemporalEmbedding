@@ -214,12 +214,12 @@ class Trainer:
 
             if self.step % self.args.log_every == 0 or self.step == 1:
                 logger.info(
-                    "epoch {} step {:>4} | loss={:.4f} mtm={:.4f} con={:.4f} "
-                    "acc={:.3f} (rand={:.3f} lift={:.3f}) |g|={:.2f}",
+                    "[TRAIN] epoch {} step {:>4} | loss={:.4f} mtm={:.4f} con={:.4f} "
+                    "acc={:.3f} rand={:.3f} lift={:.3f}",
                     epoch, self.step, entry["loss"],
                     entry["loss_mtm"], entry["loss_contrastive"],
                     entry["infonce_acc"], entry["infonce_acc_random"],
-                    entry["infonce_lift"], entry["grad_norm"],
+                    entry["infonce_lift"],
                 )
 
         avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -326,11 +326,11 @@ class Trainer:
                     val_eval = self._eval_epoch(self.val_loader, epoch)
                     self.val_history.append(val_eval)
                     logger.info(
-                        "EVAL epoch {} | "
-                        "train: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
-                        "(rand={:.3f} lift={:.3f}) | "
-                        "val:   loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
-                        "(rand={:.3f} lift={:.3f})",
+                        "[EVAL] epoch {} | "
+                        "TRAIN: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
+                        "rand={:.3f} lift={:.3f} | "
+                        "VALIDATION: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
+                        "rand={:.3f} lift={:.3f}",
                         epoch,
                         train_eval["loss"], train_eval["loss_mtm"],
                         train_eval["loss_contrastive"], train_eval["infonce_acc"],
@@ -350,9 +350,9 @@ class Trainer:
                         break
                 else:
                     logger.info(
-                        "EVAL epoch {} | train: loss={:.4f} mtm={:.4f} "
-                        "con={:.4f} acc={:.3f} (rand={:.3f} lift={:.3f}) "
-                        "(no val loader)",
+                        "[EVAL] epoch {} | TRAIN: loss={:.4f} mtm={:.4f} "
+                        "con={:.4f} acc={:.3f} rand={:.3f} lift={:.3f} "
+                        "(no validation loader)",
                         epoch, train_eval["loss"], train_eval["loss_mtm"],
                         train_eval["loss_contrastive"], train_eval["infonce_acc"],
                         train_eval["infonce_acc_random"], train_eval["infonce_lift"],

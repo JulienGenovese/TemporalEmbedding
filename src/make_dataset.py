@@ -9,6 +9,10 @@ davvero qualcosa:
     pattern temporale per l'encoder time-aware.
   * **Impronta per-cliente** — all'interno del suo tipo, ogni cliente predilige
     un sottoinsieme stabile di esercenti e ha un proprio livello di spesa tipico.
+  * **Esercenti universali condivisi** — un piccolo set di piattaforme
+    (``COMMON_MERCHANTS``: e-commerce/pagamenti/streaming) presso cui *tutti* i
+    clienti spendono con probabilità ``P_COMMON_MERCHANT`` ad ogni transazione,
+    a prescindere dal cluster: una quota di spesa comune e non discriminante.
   * **Mappatura coerente esercente→MCC** — i campi categorici sono correlati
     (l'esercente predice gli altri), così la testa MTM vede segnale e non rumore.
   * **Pattern temporali** — un ritmo di spesa giornaliero specifico del cluster.
@@ -59,6 +63,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +74,7 @@ N_TRANSACTIONS = 400_000
 N_CLIENTS = 4_000
 MIN_N_TRANSACTIONS_PER_CLIENT = 50
 NOISE_LEVEL = 0.3                  # manopola di difficoltà di default (0=pulito … 1=molto rumoroso)
+P_COMMON_MERCHANT = 0.15           # prob. che una transazione vada a un esercente "universale"
 TS_BASE = 1_577_836_800            # 2020-01-01 00:00 UTC
 TS_RANGE = 4 * 365 * 24 * 3600     # ~4 anni in secondi
 DAY = 86_400
@@ -101,6 +107,14 @@ TRAVEL    = ["Trenitalia", "Booking", "Airbnb", "RyanAir", "Easyjet"]
 UTILITIES = ["TIM", "Vodafone", "Eni", "Shell"]
 PAYMENTS  = ["PayPal", "Satispay", "Bancomat", "Netflix", "Spotify", "Starbucks"]
 MERCHANT_POOL = GROCERIES + SHOPPING + TRAVEL + UTILITIES + PAYMENTS
+
+# Esercenti "universali": piattaforme che TUTTI i clienti usano, a prescindere
+# dal cluster di appartenenza (e-commerce / pagamenti / streaming). Ad ogni
+# transazione, con probabilità ``P_COMMON_MERCHANT``, l'esercente viene pescato
+# (uniformemente) da qui invece che dal pool del cluster: introduce una quota di
+# spesa *condivisa* fra tutti i clienti, segnale comune e non discriminante.
+# Sono già dentro MERCHANT_POOL, quindi ereditano un profilo (mcc, macro_tipo).
+COMMON_MERCHANTS = ["Amazon", "PayPal", "Netflix", "Spotify"]
 
 
 # A ogni esercente assegniamo un profilo fisso (mcc, macro_tipo) così i campi
@@ -225,11 +239,12 @@ def generate(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
     per_client = df.groupby("client_id").size()
-    print(f"Saved {len(df):,} rows × {len(df.columns)} cols → {out_path} "
-          f"(noise_level={noise_level:.2f})")
-    print(f"  clients: {df['client_id'].nunique()} "
-          f"(min={per_client.min()}, max={per_client.max()}, mean={per_client.mean():.1f} tx/client)")
-    print("  clusters: " + ", ".join(
+    logger.info("Saved {:,} rows × {} cols → {} (noise_level={:.2f})",
+                len(df), len(df.columns), out_path, noise_level)
+    logger.info("  clients: {} (min={}, max={}, mean={:.1f} tx/client)",
+                df["client_id"].nunique(), per_client.min(), per_client.max(),
+                per_client.mean())
+    logger.info("  clusters: {}", ", ".join(
         f"{t['name']}={int((type_idx == i).sum())}" for i, t in enumerate(CLIENT_TYPES)))
     return out_path
 
@@ -309,10 +324,15 @@ def _generate_amount(mu: float, rng: np.random.Generator) -> tuple[float, int]:
 
 
 def _generate_merchant(off: bool, pool: list, fav_merchants: np.ndarray,
-                       rng: np.random.Generator, p_global_merchant: float) -> str:
+                       rng: np.random.Generator, p_global_merchant: float,
+                       p_common: float) -> str:
     """Sceglie l'esercente di una transazione (estrazioni **categoriche/uniformi**).
 
-    Logica gerarchica:
+    Logica gerarchica (le prob. sono **Bernoulli** valutate in ordine):
+      * **Esercenti universali** — con prob. ``p_common`` (costante, *non* legata
+        al rumore) la transazione va a un merchant di ``COMMON_MERCHANTS``,
+        pescato **uniformemente**. È la quota di spesa che TUTTI i clienti, di
+        qualunque cluster, condividono: presente anche con ``noise_level=0``.
       * Se la transazione è *fuori-pattern* (``off``) oppure scatta un'estrazione
         "globale" (con prob. ``p_global_merchant``, che cresce col rumore), si
         pesca **uniformemente da tutto** ``MERCHANT_POOL`` → sovrapposizione fra
@@ -323,6 +343,8 @@ def _generate_merchant(off: bool, pool: list, fav_merchants: np.ndarray,
         0.7/0.3 è una **Bernoulli** che dà concentrazione sui preferiti ma non
         totale rigidità.
     """
+    if rng.random() < p_common:
+        return str(rng.choice(COMMON_MERCHANTS))            # esercenti universali (tutti i clienti)
     if off or rng.random() < p_global_merchant:
         return str(rng.choice(MERCHANT_POOL))               # sovrapposizione fra cluster
     return (str(rng.choice(fav_merchants)) if rng.random() < 0.7
@@ -376,7 +398,8 @@ def _generate_client(client_id: int,
         off = rng.random() < p_offpattern
         mu = _GLOBAL_AMOUNT_MU if off else amount_mu        # fuori-pattern: ignora l'impronta
         amount, sign = _generate_amount(mu, rng)
-        merchant = _generate_merchant(off, pool, fav_merchants, rng, p_global_merchant)
+        merchant = _generate_merchant(off, pool, fav_merchants, rng,
+                                      p_global_merchant, P_COMMON_MERCHANT)
         rows.append(_row(client_id, int(ts), amount, merchant, rng, noise_level))
 
         if sign < 0 and rng.random() < p_refund:
