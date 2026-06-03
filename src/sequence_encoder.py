@@ -13,17 +13,29 @@ class TimeAwarePositionalEncoding(nn.Module):
     time gaps (in seconds) rather than integer positions. The [CLS] token
     at position 0 receives a zero time encoding.
 
-    Frequencies are fixed (not learnable) following Vaswani et al.
+    Frequencies are fixed (not learnable) following Vaswani et al. The
+    bank spans periods geometrically from ``min_timescale`` (fastest
+    channel) to ``max_timescale`` (slowest channel), both in seconds, so
+    it can be aligned with the actual range of inter-transaction gaps.
+    Setting ``min_timescale`` above the smallest real delta_t avoids
+    aliasing the high-frequency channels.
     """
 
-    def __init__(self, d_model: int = 128, max_timescale: float = 1e6):
+    def __init__(
+        self,
+        d_model: int = 128,
+        min_timescale: float = 3600.0,
+        max_timescale: float = 1e6,
+    ):
         super().__init__()
         self.d_model = d_model
-        # Pre-compute frequency bands (fixed)
+        # Pre-compute frequency bands (fixed): periods geometric in
+        # [min_timescale, max_timescale]; freqs = 1 / period.
         half = d_model // 2
-        freqs = torch.exp(
-            -torch.arange(half, dtype=torch.float32) * (math.log(max_timescale) / half)
-        )
+        log_min, log_max = math.log(min_timescale), math.log(max_timescale)
+        i = torch.arange(half, dtype=torch.float32)
+        timescales = torch.exp(log_min + i * (log_max - log_min) / (half - 1))
+        freqs = 1.0 / timescales
         self.register_buffer("freqs", freqs)  # (d_model/2,)
 
     def forward(self, delta_t: torch.Tensor) -> torch.Tensor:
