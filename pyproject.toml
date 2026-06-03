@@ -9,6 +9,7 @@ dependencies = [
     "loguru>=0.7.2",
     "matplotlib>=3.10.9",
     "pandas>=3.0.2",
+    "scipy>=1.17.1",
     "tensorboard>=2.20.0",
     "tensorflow>=2.21.0",
     "torch>=2.11.0",

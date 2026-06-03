@@ -259,7 +259,7 @@ def _client_fingerprint(ctype: dict, rng: np.random.Generator,
     Distribuzioni usate:
       * ``fav_merchants`` — quanti preferiti: **uniforme discreta** in [3,7]
         (``rng.integers(3, 8)``); *quali*: campionamento **uniforme senza
-        rimpiazzo** dal pool del cluster (``replace=False``), così i preferiti
+        rimpiazzo** dal pool del cluster (``repl—ace=False``), così i preferiti
         sono distinti.
       * ``amount_mu`` — la media (in spazio log) della log-normale degli importi
         è il valore del cluster più una perturbazione **gaussiana** N(0, σ). La
@@ -323,8 +323,11 @@ def _generate_amount(mu: float, rng: np.random.Generator) -> tuple[float, int]:
     return sign * float(rng.lognormal(mean=mu, sigma=1.0)), sign
 
 
-def _generate_merchant(off: bool, pool: list, fav_merchants: np.ndarray,
-                       rng: np.random.Generator, p_global_merchant: float,
+def _generate_merchant(off: bool, 
+                       pool: list,
+                       fav_merchants: np.ndarray,
+                       rng: np.random.Generator, 
+                       p_global_merchant: float,
                        p_common: float) -> str:
     """Sceglie l'esercente di una transazione (estrazioni **categoriche/uniformi**).
 
@@ -372,7 +375,8 @@ def _generate_refund(ts: int, amount: float,
 def _generate_client(client_id: int,
                      n_tx: int,
                      ctype: dict,
-                     rng: np.random.Generator, noise_level: float = 0.0) -> list[dict]:
+                     rng: np.random.Generator, 
+                     noise_level: float = 0.0) -> list[dict]:
     """Genera ``n_tx`` transazioni per un cliente del cluster ``ctype``.
 
     Orchestra i generatori per-componente (:func:`_client_fingerprint`,
