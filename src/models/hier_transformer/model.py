@@ -13,8 +13,8 @@ from .sequence_encoder import SequenceTransformer
 from .loss import MTMHead, ContrastiveHead
 
 
-# Default feature schema — 5 field slots:
-#   importo(signed) → 2, merchant(hash) → 1, mcc/macro_tipo → 2   total = 5
+# Default feature schema — 4 field slots:
+#   importo(signed) → 2, merchant(hash) → 1, cocau → 1   total = 4
 
 
 
@@ -187,8 +187,7 @@ class EmbeddingModel(nn.Module):
 DEFAULT_FEATURES: list[FeatureSpec] = [
     NumericFeature("importo", signed=True),
     HighCardCategoricalFeature("merchant"),
-    CategoricalFeature("mcc",        801),
-    CategoricalFeature("macro_tipo",  25),
+    CategoricalFeature("cocau",  501),
 ]
 
 
@@ -219,8 +218,7 @@ if __name__ == "__main__":
         # Merchant (raw IDs — double hash computed internally)
         "merchant":   torch.randint(1, 100_000, (B, T), device=device),
         # Categoricals
-        "mcc":        torch.randint(1, 800, (B, T), device=device),
-        "macro_tipo": torch.randint(1, 24,  (B, T), device=device),
+        "cocau": torch.randint(0, 501,  (B, T), device=device),
         # Datetime as Unix timestamp (int64); encoder decomposes automatically
         "timestamp":  (torch.randint(0, 126_230_400, (B, T), device=device) + ts_base).long(),
         # Padding mask (last 8 transactions are padded)

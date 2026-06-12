@@ -76,7 +76,7 @@ def info_nce_loss(z: torch.Tensor,
 
     # Mask out self-similarity
     self_mask = torch.eye(z.size(0), device=z.device, dtype=torch.bool)
-    sim = sim.masked_fill(self_mask, -1e9)
+    sim = sim.masked_fill(self_mask, torch.finfo(sim.dtype).min)
 
     # Log-softmax over columns (all other samples)
     log_probs = F.log_softmax(sim, dim=1)  # (B, B)

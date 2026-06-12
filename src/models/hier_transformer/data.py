@@ -22,7 +22,8 @@ from .encoder import (
     FeatureSpec, HighCardCategoricalFeature, NumericFeature,
 )
 
-from .config import FEATURE_COLS, DataConfig, TrainingConfig
+from ...constant import FEATURE_COLS, DataConfig
+from .hier_config import TrainingConfig
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +392,7 @@ class DataModule:
           are read together via :func:`pandas.read_parquet`.  Mixing both
           extensions in the same folder is rejected.
         """
-        path = Path(self.args.csv_path)
+        path = Path(self.args.train_path)
         logger.info("Loading dataframe from {}", path)
         if not path.exists():
             raise FileNotFoundError(f"{path} not found")
@@ -467,7 +468,7 @@ class DataModule:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from .config import TrainingConfig
+    from ...constant import TrainingConfig
 
     args = TrainingConfig()
     train_loader, val_loader, features = DataModule(args)()

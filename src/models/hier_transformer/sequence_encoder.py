@@ -8,11 +8,9 @@ from torch.utils.checkpoint import checkpoint
 
 class TimeAwarePositionalEncoding(nn.Module):
     """Positional encoding based on inter-transaction time deltas.
-
     Uses the same sinusoidal idea as standard PE but driven by actual
     time gaps (in seconds) rather than integer positions. The [CLS] token
     at position 0 receives a zero time encoding.
-
     Frequencies are fixed (not learnable) following Vaswani et al. The
     bank spans periods geometrically from ``min_timescale`` (fastest
     channel) to ``max_timescale`` (slowest channel), both in seconds, so
@@ -45,7 +43,6 @@ class TimeAwarePositionalEncoding(nn.Module):
         Returns:
             (B, T+1, d_model) — positional encoding to ADD to the sequence
         # PE(Δt)=[sin(ω0​Δt),sin(ω1​Δt),…,sin(ω63​Δt),cos(ω0​Δt),cos(ω1​Δt),…,cos(ω63​Δt)]
-
         """
         # TODO: l'e_cls non fa distionzione con l'e_t0
         angles = delta_t.unsqueeze(-1) * self.freqs  # (B, T+1, d_model/2)

@@ -23,7 +23,7 @@ import torch.nn as nn
 from loguru import logger
 from torch.utils.data import DataLoader
 
-from .config import TrainingConfig
+from .hier_config import TrainingConfig
 from .data import DataModule
 from .encoder import (
     DatetimeFeature, FeatureSpec, HighCardCategoricalFeature, NumericFeature,
@@ -33,6 +33,7 @@ from .model import EmbeddingModel, count_parameters
 
 
 class Trainer:
+    
     """Pre-training loop encapsulated as a callable object.
 
     Owns the model, loss, dataloader and optimizer; ``__call__`` runs the
@@ -57,7 +58,7 @@ class Trainer:
         # precision so the smoke-test numerics stay reproducible).
         self.device_type = self.device.split(":")[0]
         self.use_amp = self.device_type == "cuda"
-        self.scaler = torch.amp.GradScaler(self.device_type, enabled=self.use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         logger.info("AMP autocast: {}", self.use_amp)
 
         self.model = model.to(self.device)
@@ -390,7 +391,7 @@ class Trainer:
         return final_path
 
 
-if __name__ == "__main__":
+def main() -> Path:
     args = TrainingConfig()
     logger.info("TrainingConfig: {}", args)
 
@@ -415,4 +416,8 @@ if __name__ == "__main__":
         args=args, model=model, loss=loss,
         loader=train_loader, val_loader=val_loader,
     )
-    trainer()
+    return trainer()
+
+
+if __name__ == "__main__":
+    main()

@@ -42,8 +42,20 @@ essere provata end-to-end su una normale CPU senza bisogno di dati reali.
 
 ## Prerequisiti
 
-- **Python 3.14**
+- **Python 3.10–3.11** (come da `pyproject.toml`)
 - [**uv**](https://docs.astral.sh/uv/) come gestore dell'ambiente e delle dipendenze
+
+## Uso con Dev Container (PyTorch)
+
+Il repository include una configurazione in `.devcontainer/` basata su immagine
+**`pytorch/pytorch`**.
+
+Apri il progetto in VS Code e scegli:
+
+1. `Dev Containers: Reopen in Container`
+
+Alla prima creazione del container vengono installate automaticamente le dipendenze
+del progetto.
 
 Installa tutto con:
 
@@ -51,27 +63,76 @@ Installa tutto con:
 uv sync
 ```
 
-> Gli script vivono in `src/` e usano import relativi: vanno sempre lanciati come modulo
-> (`python -m src.<nome>`), mai come `python src/<nome>.py`.
+> È disponibile una CLI progetto (`py`) implementata con **Typer** e registrata in `pyproject.toml`.
+> Usa i comandi come `uv run py <comando> ...`.
+> Per vedere tutti i comandi: `uv run py --help`.
 
-## 1. Generare i dati
+## 1. Generare i dati sintetici
 
-Crea un dataset sintetico di transazioni (~10.000 righe, 100 clienti) in
-`data/transactions.csv`:
+I comandi da usare sono:
 
 ```bash
-uv run python -m src.make_dataset
+uv run py generate --type vanilla
+uv run py generate --type coherent
 ```
 
-È il punto di partenza: serve a far girare l'addestramento senza dati reali.
+Genera un CSV sintetico (di default ~400.000 transazioni su 4.000 clienti).
+
+### Modificare noise e altri parametri del generatore
+
+I parametri del dato sintetico stanno in `src/datasets/utils/config.py`.
+I default di `SamplingConfig` sono letti da `config.toml`, sezione `[dataset.sampling]`.
+Il `noise_level` è letto da `[dataset.sampling]`, mentre i parametri specifici del dataset `coherent` sono letti da `[syntentic.coherent]`:
+
+- `NoiseConfig.noise_level` (range `[0, 1]`)
+- `AmountConfig.merchant_amount_weight` (range `[0, 1]`, usato in `coherent`)
+
+I path di output sono separati per esperimento e definiti con:
+- `folder`
+- `name_file`
+- `ext` (`csv`/`.csv` oppure `parquet`/`.parquet`; altri valori generano errore)
+
+nelle sezioni:
+- `[syntentic.vanilla]`
+- `[syntentic.coherent]`
+
+Il filename finale include automaticamente il noise level (es. `transactions_coherent_noise_0_90.csv`), e il file salvato (CSV o parquet) include anche la colonna `noise_level`.
+
+Il parametro principale del rumore è:
+
+- `NoiseConfig.noise_level` (default `0.9`, range `[0, 1]`)
+
+Con questo valore vengono ricalcolati automaticamente:
+
+- `p_offpattern`
+- `p_global_merchant`
+- `p_refund`
+- `sigma_spending`
+
+Altri parametri utili da modificare nello stesso file:
+
+| Sezione | Parametri principali | Effetto |
+|---|---|---|
+| `SamplingConfig` | `n_transactions`, `n_clients`, `alpha_dirichlet`, `min_tx_per_client`, `seed`, `noise_level` (in `config.toml` → `[dataset.sampling]`) | volume dataset, distribuzione transazioni per cliente e livello di rumore globale |
+| `AmountConfig` | `spending_probability`, `lognormal_sigma`, `merchant_amount_weight` (in `config.toml` → `[syntentic.coherent]`) | frequenza addebiti/accrediti, dispersione importi e bilanciamento client/merchant nel dataset `coherent` |
+| `MerchantConfig` | `common_merchants`, `p_common_merchant`, pool merchant | varietà e pattern merchant |
+| `CategoricalConfig` | `cocau_vocab`, `p_noise` | cardinalità categorie e rumore categorico |
+| `OutputConfig` | `folder`, `name_file`, `ext` (in `config.toml` → `[syntentic.vanilla]`, `[syntentic.coherent]`) | path file (CSV/parquet) per esperimento con suffix automatico `noise_level` |
+
+`--type` (oppure `-type`) supporta solo `vanilla` o `coherent`.
 
 ## 2. Addestrare il modello
 
 Avvia il pre-addestramento end-to-end:
 
 ```bash
-uv run python -m src.train
+uv run py train
+uv run py train --type hier
+uv run py train --type base
 ```
+
+`--type` (oppure `-type`) ha default `hier`.  
+`base` è supportato dalla CLI e al momento usa la stessa pipeline di training di `hier`.
 
 Con le impostazioni di default l'addestramento dura pochi minuti su CPU. Al termine
 trovi sotto `checkpoints/`:
@@ -83,49 +144,75 @@ trovi sotto `checkpoints/`:
 | `train_eval_history.json` | metriche di valutazione sul set di training, per epoca     |
 | `val_history.json`        | metriche di valutazione sul set di validazione, per epoca  |
 
-### Cambiare le impostazioni
+### Predire embedding per finestra
 
-Lo script **non accetta argomenti da riga di comando**: tutti gli iper-parametri stanno
-in `src/config.py`. Per modificarli (numero di epoche, learning rate, dimensione del
-modello, ecc.) basta cambiare i valori in quel file. I più usati:
+Dopo il training puoi generare gli embedding finestra-per-finestra:
 
-| Parametro            | Default | Significato                                       |
-|----------------------|---------|---------------------------------------------------|
-| `epochs`             | 20      | numero di epoche di addestramento                 |
-| `seq_len`            | 32      | quante transazioni per finestra                   |
-| `clients_per_batch`  | 8       | clienti distinti per batch                        |
-| `mask_prob`          | 0.15    | quanti campi nascondere nell'esercizio di ricostruzione |
-| `contrastive_weight` | 0.5     | peso dell'esercizio di confronto nella loss       |
-| `lr`                 | 3e-4    | learning rate                                     |
-| `val_frac`           | 0.2     | frazione di clienti tenuti per la validazione     |
-| `device`             | `None`  | `None` = automatico (GPU se disponibile, altrimenti CPU) |
+```bash
+uv run py pred
+uv run py pred --type hier
+uv run py pred --type base
+```
+
+Il comando usa il checkpoint `checkpoints/model_final.pt`, legge il dataset da
+`[model.hierTransformer.paths].train_path` e salva l'output in
+`[model.hierTransformer.paths].pred_path/[model.hierTransformer.paths].pred_file_name`.
+
+### Modificare parametri training e modello
+
+I parametri stanno in `src/models/hier_transformer/hier_config.py`, con default letti da `config.toml`:
+
+- `TrainingConfig`: parametri di training/dataloader
+- `ModelConfig`: parametri architettura Transformer
+
+Sezioni TOML del modello:
+
+- `[model.hierTransformer.paths]`
+- `[model.hierTransformer.training]`
+- `[model.hierTransformer.architecture]`
+
+Parametri training più usati (`TrainingConfig`):
+
+| Parametro | Default | Significato |
+|---|---|---|
+| `epochs` | 30 | numero epoche |
+| `seq_len` | 32 | lunghezza finestra temporale |
+| `clients_per_batch` | 8 | clienti distinti per batch |
+| `windows_per_pair` | 2 | finestre per coppia InfoNCE |
+| `mask_prob` | 0.15 | quota di feature mascherate (MTM) |
+| `contrastive_weight` | 0.5 | peso parte contrastiva della loss |
+| `lr` | 3e-4 | learning rate |
+| `weight_decay` | 0.01 | regolarizzazione AdamW |
+| `lr_gamma` | 0.95 | decay esponenziale del LR per epoca |
+| `val_frac` | 0.2 | quota clienti in validazione |
+| `device` | `None` | auto-select (`cuda` se disponibile, altrimenti `cpu`) |
+
+Parametri modello (`ModelConfig`):
+
+| Parametro | Default | Significato |
+|---|---|---|
+| `d_field` | 64 | embedding di ogni campo transazione |
+| `d_model` | 128 | dimensione interna del modello |
+| `field_n_layers` | 2 | layer attenzione intra-transazione |
+| `field_n_heads` | 4 | teste attenzione intra-transazione |
+| `seq_n_layers` | 4 | layer attenzione sulla sequenza |
+| `seq_n_heads` | 8 | teste attenzione sulla sequenza |
+| `dim_feedforward` | 512 | dimensione FFN dei blocchi Transformer |
+| `dropout` | 0.1 | dropout globale |
+| `n_frequencies` | 16 | frequenze sin/cos per encoder numerico |
 
 ## 3. Visualizzare i risultati dell'addestramento
 
-Genera i grafici a partire dalla storia salvata durante il training:
+Esporta la storia del training su TensorBoard:
 
 ```bash
-uv run python -m src.plots
-```
-
-Legge `checkpoints/history.json` e scrive in `checkpoints/plots/`:
-
-- **`training_curves.png`** — riepilogo a 6 pannelli con l'andamento della loss,
-  dell'accuratezza e di altre metriche;
-- **`mtm_breakdown.png`** — l'andamento della ricostruzione, campo per campo.
-
-Opzioni utili:
-
-```bash
-uv run python -m src.plots --smoothing 5        # media mobile più ampia sulle curve
-uv run python -m src.plots --tensorboard        # esporta anche per TensorBoard
-```
-
-Con `--tensorboard` i dati finiscono sotto `runs/` e si esplorano con:
-
-```bash
+uv run py plot
+uv run py plot --type hier
+uv run py plot --type base --history checkpoints/history.json --runs-dir runs/base
 uv run tensorboard --logdir runs
 ```
+
+`plot` è un comando dedicato della CLI (non un'opzione di `train`).
 
 ## Verifica rapida (facoltativa)
 
@@ -133,10 +220,10 @@ Per controllare al volo che il modello si costruisca correttamente, senza CSV e 
 addestramento, gira un forward-pass su un batch sintetico in memoria:
 
 ```bash
-uv run python -m src.model
+uv run python -m src.models.hier_transformer.model
 ```
 
 ---
 
 Per i dettagli sull'architettura e sul design schema-driven dell'encoder, vedi
-`CLAUDE.md`.
+`copilot.md`.

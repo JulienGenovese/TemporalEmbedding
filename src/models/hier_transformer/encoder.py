@@ -393,19 +393,19 @@ if __name__ == "__main__":
     # Simulate raw training data for fitting
     raw_amounts  = [120.5, -47.0, -9.9, 300.0, 9.0, -500.0, 15.3, 88.0]
     raw_balances = [1000.0, 950.0, 500.0, 800.0, 815.0, 1200.0, 340.0]
-    raw_mccs     = [5411, 5812, 742, 5999, 100, 200]
+    raw_cocau    = [8, 14, 27, 41, 58, 73, 89, 101, 120, 133]
 
-    mcc_feature = CategoricalFeature("mcc").fit(raw_mccs)
+    cocau_feature = CategoricalFeature("cocau").fit(raw_cocau)
     features: list[FeatureSpec] = [
         NumericFeature("amount", signed=True).fit(raw_amounts),    # 2 slots (abs + sign)
         NumericFeature("balance").fit(raw_balances),                # 1 slot
-        mcc_feature,
+        cocau_feature,
         DatetimeFeature("timestamp"),            # 3 slots (hour, dow, dom)
         HighCardCategoricalFeature("merchant", hash_buckets=1024),
     ]
     encoder = TransactionEncoder(features, d_field=D, n_frequencies=8)
     print(f"n_fields = {encoder.n_fields}   (expected 8 = 2+1+1+3+1)")
-    print(f"mcc vocab_size = {mcc_feature.vocab_size}  (auto-fitted from 6 unique values + padding)")
+    print(f"cocau vocab_size = {cocau_feature.vocab_size}  (auto-fitted from unique values + padding)")
 
     # Build a batch.  Padding is position T-1 in every row:
     # numerics = 0.0, long IDs = 0, timestamps = 0.
@@ -415,8 +415,8 @@ if __name__ == "__main__":
                                     [ -9.9,  300.0, 9.0, 0.0]]),
         "balance":    torch.tensor([[1000.0, 950.0, 950.0, 0.0],
                                     [ 500.0, 800.0, 815.0, 0.0]]),
-        "mcc":        torch.tensor([[ 5411, 5812,  742,   0],
-                                    [  742, 5411, 5999,   0]]),
+        "cocau":      torch.tensor([[101, 120,  27,   0],
+                                    [ 58,  73, 140,   0]]),
         "timestamp":  torch.tensor([[1_577_836_800,   # 2020-01-01 00:00 UTC (Wed)
                                      1_609_459_200,   # 2021-01-01 00:00 UTC (Fri)
                                      1_640_995_200,   # 2022-01-01 00:00 UTC (Sat)

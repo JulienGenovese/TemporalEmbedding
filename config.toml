@@ -1,0 +1,53 @@
+[dataset.sampling]
+n_transactions = 400000
+n_clients = 4000
+alpha_dirichlet = 1.5
+min_tx_per_client = 50
+seed = 42
+noise_level = 0.9
+[syntentic.vanilla]
+folder = "data"
+name_file = "transactions_vanilla"
+ext = ".csv"
+
+[syntentic.coherent]
+merchant_amount_weight = 0.5
+folder = "data"
+name_file = "transactions_coherent"
+ext = ".csv"
+
+[model.hierTransformer.paths]
+train_path = "data/transactions_coherent_noise_0_30.csv"
+pred_path = "data/pred"
+pred_file_name = "pred_embeddings.csv"
+ckpt_dir = "checkpoints"
+
+[model.hierTransformer.training]
+seq_len = 32
+windows_per_client = 4
+clients_per_batch = 8
+windows_per_pair = 2
+epochs = 30
+mask_prob = 0.15
+contrastive_weight = 0.5
+lr = 0.0003
+weight_decay = 0.01
+lr_gamma = 0.95
+grad_clip = 1.0
+val_frac = 0.2
+val_every = 1
+early_stopping_patience = 5
+early_stopping_min_delta = 0.0
+log_every = 5
+seed = 0
+
+[model.hierTransformer.architecture]
+d_field = 64
+d_model = 128
+n_frequencies = 16
+field_n_layers = 2
+field_n_heads = 4
+seq_n_layers = 4
+seq_n_heads = 8
+dim_feedforward = 512
+dropout = 0.1
