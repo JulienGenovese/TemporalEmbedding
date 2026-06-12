@@ -417,7 +417,7 @@ class DataModule:
 
         logger.info(
             "Loaded {:,} rows / {} clients",
-            len(df), df["client_id"].nunique(),
+            len(df), df[self.data_config.client_col].nunique(),
         )
         return df
 
