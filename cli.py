@@ -11,7 +11,7 @@ from loguru import logger
 app = typer.Typer(add_completion=False)
 
 
-def _syntetic(dataset_type: Literal["vanilla", "coherent"]) -> Path:
+def _syntetic(dataset_type: Literal["vanilla", "coherent", "simple", "timing"]) -> Path:
     from src.datasets.main import generate
 
     return generate(dataset_type=dataset_type)
@@ -58,7 +58,7 @@ def _pred(model_type: str) -> Path:
 
 @app.command("syntetic")
 def generate_command(
-    dataset_type: Literal["vanilla", "coherent"] = typer.Option(
+    dataset_type: Literal["vanilla", "coherent", "simple", "timing"] = typer.Option(
         ...,
         "--type",
         help="Dataset syntetic to generate.",

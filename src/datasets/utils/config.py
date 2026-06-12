@@ -45,6 +45,20 @@ _EXPERIMENT_SECTIONS: dict[str, tuple[str, ...]] = {
         "syntheticData.output.coherent",
         "synteticData.output.coherent",
     ),
+    "simple": (
+        "syntentic.simple",
+        "syntetic.simple",
+        "synthetic.simple",
+        "syntheticData.output.simple",
+        "synteticData.output.simple",
+    ),
+    "timing": (
+        "syntentic.timing",
+        "syntetic.timing",
+        "synthetic.timing",
+        "syntheticData.output.timing",
+        "synteticData.output.timing",
+    ),
 }
 _SUPPORTED_OUTPUT_EXTENSIONS = {".csv", ".parquet"}
 _MISSING = object()
@@ -280,6 +294,16 @@ class OutputConfig:
             "coherent", "out_path", Path("data") / "transactions_coherent.csv",
         ),
     )
+    simple_out_path: Path = field(
+        default_factory=lambda: _output_path(
+            "simple", "out_path", Path("data") / "transactions_simple.csv",
+        ),
+    )
+    timing_out_path: Path = field(
+        default_factory=lambda: _output_path(
+            "timing", "out_path", Path("data") / "transactions_timing.csv",
+        ),
+    )
 
     def __post_init__(self) -> None:
         """Normalize configured output paths to `Path` objects.
@@ -293,6 +317,8 @@ class OutputConfig:
         """
         self.vanilla_out_path = Path(self.vanilla_out_path)
         self.coherent_out_path = Path(self.coherent_out_path)
+        self.simple_out_path = Path(self.simple_out_path)
+        self.timing_out_path = Path(self.timing_out_path)
 
     def path_for(self, experiment: str, noise_level: float) -> Path:
         """Return output path for a given experiment variant.

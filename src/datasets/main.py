@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Literal
 
 from .experiments.coherent_sintetic import generate as generate_coherent
+from .experiments.simple import generate as generate_simple
+from .experiments.timing import generate as generate_timing
 from .utils.config import DatasetConfig
 from .utils.entities import ClientType
 from .experiments.vanilla import generate as generate_vanilla
 
-DatasetType = Literal["vanilla", "coherent"]
+DatasetType = Literal["vanilla", "coherent", "simple", "timing"]
 
 
 def generate(
@@ -31,4 +33,8 @@ def generate(
             config=config,
             client_types=client_types,
         )
+    if dataset_type == "simple":
+        return generate_simple(config=config)
+    if dataset_type == "timing":
+        return generate_timing(config=config)
     raise ValueError(f"Unsupported dataset type: {dataset_type}")

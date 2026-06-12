@@ -16,6 +16,11 @@ folder = "data"
 name_file = "transactions_coherent"
 ext = ".csv"
 
+[syntentic.simple]
+folder = "data"
+name_file = "transactions_simple"
+ext = ".csv"
+
 [model.hierTransformer.paths]
 train_path = "data/transactions_coherent_noise_0_30.csv"
 pred_path = "data/pred"
