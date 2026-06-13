@@ -56,9 +56,10 @@ class Vocabulary:
 class NumericNormalizer:
     """Learns clip bound (percentile), then applies clip → log1p → z-score.
 
+    Operates on the **magnitude only**: ``abs()`` is taken in both ``fit()``
+    and ``__call__()``, so the sign is never the normalizer's concern (it is
+    carried separately by the sign embedding in :class:`NumericFeature`).
     Fitted on non-zero values only (zeros are treated as padding and preserved).
-    For signed features pass the raw (possibly negative) values — the normalizer
-    takes ``abs()`` internally during both ``fit()`` and ``__call__()``.
     """
 
     def __init__(self, clip_pct: float = 99.0) -> None:
@@ -66,14 +67,10 @@ class NumericNormalizer:
         self._clip_hi: float = 0.0
         self._mean: float = 0.0
         self._std: float = 1.0
-        self._signed: bool = False
         self._fitted: bool = False
 
-    def fit(self, values, *, signed: bool = False) -> NumericNormalizer:
-        self._signed = signed
-        t = torch.as_tensor(values, dtype=torch.float32)
-        if signed:
-            t = t.abs()
+    def fit(self, values) -> NumericNormalizer:
+        t = torch.as_tensor(values, dtype=torch.float32).abs()
         nonzero = t[t != 0]
         if len(nonzero) == 0:
             self._fitted = True
@@ -81,17 +78,18 @@ class NumericNormalizer:
         self._clip_hi = float(torch.quantile(nonzero, self.clip_pct / 100.0))
         transformed = torch.log1p(nonzero.clamp(max=self._clip_hi))
         self._mean = float(transformed.mean())
-        self._std = float(transformed.std().clamp(min=1e-8))
+        # unbiased=False so a single non-zero value gives std=0 (not NaN from the
+        # N-1 denominator); clamp then floors it to 1e-8 to avoid div-by-zero.
+        self._std = float(transformed.std(unbiased=False).clamp(min=1e-8))
         self._fitted = True
         return self
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if not self._fitted:
             raise RuntimeError("NumericNormalizer not fitted — call fit() first")
-        if self._signed:
-            x = x.abs()
+        x = x.abs()
         mask = x == 0
-        out = (torch.log1p(x.clamp(min=0, max=self._clip_hi)) - self._mean) / self._std
+        out = (torch.log1p(x.clamp(max=self._clip_hi)) - self._mean) / self._std
         return out.masked_fill(mask, 0.0)
 
     @property
@@ -105,7 +103,6 @@ class NumericNormalizer:
             "clip_hi": self._clip_hi,
             "mean": self._mean,
             "std": self._std,
-            "signed": self._signed,
             "fitted": self._fitted,
         }
 
@@ -114,7 +111,6 @@ class NumericNormalizer:
         self._clip_hi = state["clip_hi"]
         self._mean = state["mean"]
         self._std = state["std"]
-        self._signed = state["signed"]
         self._fitted = state["fitted"]
         return self
 
@@ -208,7 +204,9 @@ class NumericFeature(FeatureSpecProtocol):
     normalizer: NumericNormalizer | None = field(default=None, repr=False)
 
     def fit(self, values, *, clip_pct: float = 99.0) -> NumericFeature:
-        self.normalizer = NumericNormalizer(clip_pct).fit(values, signed=self.signed)
+        # The normalizer works on magnitude only; the sign (for signed features)
+        # is encoded separately via the sign embedding in encode().
+        self.normalizer = NumericNormalizer(clip_pct).fit(values)
         return self
 
     @property
