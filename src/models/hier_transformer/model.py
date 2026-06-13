@@ -5,7 +5,8 @@ import torch.nn as nn
 
 from .encoder import (
     TransactionEncoder,
-    NumericFeature, CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
+    NumericFeature, NumericNormalizer,
+    CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
     FeatureSpec, categorical_vocab_sizes, numeric_field_names,
 )
 from .field_transformer import FieldTransformer
@@ -107,6 +108,7 @@ class TransactionTransformer(nn.Module):
         if self.pretrain:
             output["mtm_preds"] = self.mtm_head(transaction_embeddings)
             output["contrastive_z"] = self.contrastive_head(h_cls)
+            output["temperature"] = self.contrastive_head.temperature
 
         return output
 
@@ -163,6 +165,18 @@ class EmbeddingModel(nn.Module):
         step: int | None = None,
     ) -> None:
         payload: dict = {"model_state": self.state_dict()}
+        # Numeric normalizers are plain Python objects (not part of state_dict),
+        # so persist their fitted stats explicitly — otherwise inference would
+        # have to re-fit them on a different population than train time.
+        norm_states = {
+            f.name: f.normalizer.state_dict()
+            for f in self.features
+            if isinstance(f, NumericFeature)
+            and f.normalizer is not None
+            and f.normalizer.fitted
+        }
+        if norm_states:
+            payload["normalizer_states"] = norm_states
         if optimizer_state is not None:
             payload["optimizer_state"] = optimizer_state
         if step is not None:
@@ -179,6 +193,14 @@ class EmbeddingModel(nn.Module):
         **kwargs,
     ) -> "EmbeddingModel":
         state = torch.load(path, map_location=map_location, weights_only=False)
+        # Restore fitted numeric normalizers onto the feature specs so the
+        # encoder normalizes inference inputs exactly as it did at train time.
+        norm_states = state.get("normalizer_states", {})
+        for feat in features:
+            if isinstance(feat, NumericFeature) and feat.name in norm_states:
+                if feat.normalizer is None:
+                    feat.normalizer = NumericNormalizer()
+                feat.normalizer.load_state_dict(norm_states[feat.name])
         model = cls(features=features, **kwargs)
         model.load_state_dict(state["model_state"], strict=strict)
         return model

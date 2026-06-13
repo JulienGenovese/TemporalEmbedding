@@ -111,10 +111,15 @@ class TransactionDataset(Dataset):
         # Flat index: (client_idx, slot). The slot selects a disjoint bucket of
         # the start range in __getitem__, so distinct slots → distinct,
         # non-overlapping windows (see PairedClientBatchSampler).
-        self._index: list[tuple[int, int]] = [
+        # Subclasses override _build_index() to change the windowing policy.
+        self._index: list[tuple[int, int]] = self._build_index()
+
+    def _build_index(self) -> list[tuple[int, int]]:
+        """Flat ``(client_idx, slot)`` index — one entry per window to emit."""
+        return [
             (ci, slot)
             for ci in range(len(self.clients))
-            for slot in range(windows_per_client)
+            for slot in range(self.windows_per_client)
         ]
 
     def __len__(self) -> int:

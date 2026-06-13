@@ -11,7 +11,7 @@ dependencies = [
     "matplotlib>=3.10.9",
     "pandas>=2.3.3",
     "tensorboard>=2.20.0",
-    "torch>=2.11",
+    "torch>=2.12",
     "typer>=0.12.5",
     "scikit-learn>=1.7.2",
 ]
@@ -19,16 +19,16 @@ dependencies = [
 [project.scripts]
 py = "cli:main"
 
-# torch is a CUDA nightly (2.11.0+cu130) installed from the PyTorch nightly index.
-# The explicit index keeps it out of default PyPI resolution so `uv sync` won't
-# replace the GPU build with the CPU wheel.
+# This machine has no NVIDIA GPU, so torch is pinned to the CPU build from the
+# PyTorch CPU index. The explicit index keeps it out of default PyPI resolution
+# so `uv sync` won't pull the much larger CUDA wheel.
 [[tool.uv.index]]
-name = "pytorch-nightly-cu130"
-url = "https://download.pytorch.org/whl/nightly/cu130"
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-nightly-cu130" }
+torch = { index = "pytorch-cpu" }
 
 
 [build-system]

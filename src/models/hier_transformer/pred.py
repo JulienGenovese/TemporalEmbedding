@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader
 
 from ...constant import FEATURE_COLS
 from .data import TransactionDataset, _pad_float, _pad_long
+from .encoder import NumericFeature
 from .hier_config import TrainingConfig
 from .model import EmbeddingModel
 
@@ -30,28 +31,9 @@ class PredictionTransactionDataset(TransactionDataset):
     2. returns temporal bounds (left=min_ts, right=max_ts) per window.
     """
 
-    def __init__(
-        self,
-        df: pd.DataFrame,
-        client_col: str,
-        timestamp_col: str,
-        feature_cols: list[str],
-        seq_len: int = 32,
-        windows_per_client: int = 4,
-        seed: int = 0,
-    ):
-        super().__init__(
-            df=df,
-            client_col=client_col,
-            timestamp_col=timestamp_col,
-            feature_cols=feature_cols,
-            seq_len=seq_len,
-            windows_per_client=windows_per_client,
-            seed=seed,
-        )
-
-        # Build a flat index with only distinct slots available per client.
-        self._index = []
+    def _build_index(self) -> list[tuple[int, int]]:
+        """Only distinct slots available per client (no duplicated windows)."""
+        index: list[tuple[int, int]] = []
         for ci, client in enumerate(self.clients):
             n = int(client["n"])
             if n <= 0:
@@ -61,7 +43,8 @@ class PredictionTransactionDataset(TransactionDataset):
             else:
                 n_windows = min(self.windows_per_client, n - self.seq_len + 1)
             for slot in range(n_windows):
-                self._index.append((ci, slot))
+                index.append((ci, slot))
+        return index
 
     @staticmethod
     def _deterministic_window(
@@ -138,70 +121,118 @@ def collate_prediction(items):
     )
 
 
-def predict_window_embeddings(
-    args: TrainingConfig | None = None,
-    ckpt_path: Path | None = None,
-    output_path: Path | None = None,
-) -> Path:
-    args = args or TrainingConfig()
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Device is : {}", device)
+class Predictor:
+    """Window-level embedding inference encapsulated as a callable object.
 
-    from .data import DataModule  # local import: avoid extra import at module load
+    Mirrors the :class:`~src.models.hier_transformer.train.Trainer` paradigm:
+    owns the config, data module, model and loader; ``__call__`` runs the full
+    prediction schedule (load → build model → embed → save) and returns the
+    path of the written embeddings file.
+    """
 
-    data = DataModule(args)
-    df = data._load_dataframe()
-    sort_cols = data.data_config.transaction_sort_cols
-    df = df.sort_values(sort_cols).reset_index(drop=True)
-    logger.info("Data sorted by {}", sort_cols)
+    def __init__(
+        self,
+        args: TrainingConfig | None = None,
+        ckpt_path: Path | None = None,
+        output_path: Path | None = None,
+    ):
+        from .data import DataModule  # local import: avoids import cycle
 
-    # Keep feature fitting identical to train-time preprocessing.
-    features = data._fit_features(df)
+        self.args = args or TrainingConfig()
+        self.ckpt_path = ckpt_path
+        self.output_path = output_path
+        self.device = self.args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info("Device is : {}", self.device)
 
-    model_path = ckpt_path if ckpt_path is not None else (Path(args.ckpt_dir) / "model_final.pt")
-    if not model_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+        self.data = DataModule(self.args)
+        # Populated lazily during the run.
+        self.model: EmbeddingModel | None = None
+        self.dataset: PredictionTransactionDataset | None = None
+        self.loader: DataLoader | None = None
 
-    logger.info("Loading checkpoint from {}", model_path)
-    model = EmbeddingModel.load(
-        model_path,
-        features=features,
-        map_location=device,
-        pretrain=True,
-        use_gradient_checkpointing=(device != "cpu"),
-        **asdict(args.model),
-    ).to(device)
-    model.eval()
+    def __call__(self) -> Path:
+        return self._predict()
 
-    dataset = PredictionTransactionDataset(
-        df=df,
-        client_col=data.data_config.client_col,
-        timestamp_col=data.data_config.timestamp_col,
-        feature_cols=FEATURE_COLS,
-        seq_len=args.seq_len,
-        windows_per_client=args.windows_per_client,
-        seed=args.seed,
-    )
-    if len(dataset) == 0:
-        raise ValueError("No windows generated from input dataset.")
+    def _load_dataframe(self) -> pd.DataFrame:
+        """Load and chronologically sort the transactions (like train time)."""
+        df = self.data._load_dataframe()
+        sort_cols = self.data.data_config.transaction_sort_cols
+        df = df.sort_values(sort_cols).reset_index(drop=True)
+        logger.info("Data sorted by {}", sort_cols)
+        return df
 
-    loader = DataLoader(
-        dataset=dataset,
-        batch_size=max(1, args.batch_size),
-        shuffle=False,
-        collate_fn=collate_prediction,
-    )
+    def _build_model(self, df: pd.DataFrame) -> EmbeddingModel:
+        """Load the checkpoint and restore the train-time numeric normalizers.
 
-    rows: list[dict] = []
-    with torch.no_grad():
-        for batch, client_codes, slots, lefts, rights in loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            emb = model.embed(batch).detach().cpu().numpy()
+        Feature specs start unfitted; :meth:`EmbeddingModel.load` restores the
+        normalizer stats saved at train time so inference normalizes inputs
+        exactly as training did.  Legacy checkpoints predate persisted stats —
+        fall back to re-fitting on the prediction data (with a warning).
+        """
+        model_path = self.ckpt_path or (Path(self.args.ckpt_dir) / "model_final.pt")
+        if not model_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+
+        features = self.data.base_features
+        logger.info("Loading checkpoint from {}", model_path)
+        model = EmbeddingModel.load(
+            model_path,
+            features=features,
+            map_location=self.device,
+            pretrain=True,
+            use_gradient_checkpointing=(self.device != "cpu"),
+            **asdict(self.args.model),
+        ).to(self.device)
+        model.eval()
+
+        unfitted = [
+            f.name for f in features
+            if isinstance(f, NumericFeature)
+            and (f.normalizer is None or not f.normalizer.fitted)
+        ]
+        if unfitted:
+            logger.warning(
+                "Checkpoint has no saved normalizer for {}; re-fitting on "
+                "prediction data (legacy checkpoint — embeddings may differ "
+                "slightly from train)",
+                unfitted,
+            )
+            self.data._fit_features(df)
+
+        return model
+
+    def _build_loader(self, df: pd.DataFrame) -> DataLoader:
+        self.dataset = PredictionTransactionDataset(
+            df=df,
+            client_col=self.data.data_config.client_col,
+            timestamp_col=self.data.data_config.timestamp_col,
+            feature_cols=FEATURE_COLS,
+            seq_len=self.args.seq_len,
+            windows_per_client=self.args.windows_per_client,
+            seed=self.args.seed,
+        )
+        if len(self.dataset) == 0:
+            raise ValueError("No windows generated from input dataset.")
+        logger.info("Prediction dataset built: {:,} windows", len(self.dataset))
+        return DataLoader(
+            dataset=self.dataset,
+            batch_size=max(1, self.args.batch_size),
+            shuffle=False,
+            collate_fn=collate_prediction,
+        )
+
+    def _embed(self) -> list[dict]:
+        """Run the loader through the model → one row dict per window."""
+        rows: list[dict] = []
+        # model.embed → get_client_embedding already runs under torch.no_grad().
+        for batch, client_codes, slots, lefts, rights in self.loader:
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            emb = self.model.embed(batch).detach().cpu().numpy()
 
             for i in range(emb.shape[0]):
                 code = int(client_codes[i].item())
                 row = {
-                    "client_id": dataset.client_id_lookup[code],
+                    "client_id": self.dataset.client_id_lookup[code],
                     "client_code": code,
                     "window_slot": int(slots[i].item()),
                     "window_start_ts": int(lefts[i].item()),
@@ -210,37 +241,51 @@ def predict_window_embeddings(
                 for j, value in enumerate(emb[i]):
                     row[f"emb_{j}"] = float(value)
                 rows.append(row)
+        return rows
 
-    if output_path is not None:
-        out = output_path
-    else:
-        pred_file = Path(args.pred_file_name)
-        if pred_file.name != args.pred_file_name:
-            raise ValueError("`model.hierTransformer.paths.pred_file_name` must be a file name, not a path.")
+    def _resolve_output_path(self) -> Path:
+        if self.output_path is not None:
+            return self.output_path
+        pred_file = Path(self.args.pred_file_name)
+        if pred_file.name != self.args.pred_file_name:
+            raise ValueError(
+                "`model.hierTransformer.paths.pred_file_name` must be a file "
+                "name, not a path."
+            )
         if not pred_file.suffix:
             pred_file = pred_file.with_suffix(".csv")
-        out = Path(args.pred_path) / pred_file
-    out.parent.mkdir(parents=True, exist_ok=True)
+        return Path(self.args.pred_path) / pred_file
 
-    result = pd.DataFrame(rows)
-    result["window_start"] = pd.to_datetime(result["window_start_ts"], unit="s", utc=True)
-    result["window_end"] = pd.to_datetime(result["window_end_ts"], unit="s", utc=True)
-    if out.suffix.lower() == ".parquet":
-        result.to_parquet(out, index=False)
-    else:
-        result.to_csv(out, index=False)
+    def _save(self, rows: list[dict]) -> Path:
+        out = self._resolve_output_path()
+        out.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.success(
-        "Saved {:,} window embeddings for {:,} clients to {}",
-        len(result),
-        result["client_id"].nunique(),
-        out.resolve(),
-    )
-    return out
+        result = pd.DataFrame(rows)
+        result["window_start"] = pd.to_datetime(result["window_start_ts"], unit="s", utc=True)
+        result["window_end"] = pd.to_datetime(result["window_end_ts"], unit="s", utc=True)
+        if out.suffix.lower() == ".parquet":
+            result.to_parquet(out, index=False)
+        else:
+            result.to_csv(out, index=False)
+
+        logger.success(
+            "Saved {:,} window embeddings for {:,} clients to {}",
+            len(result),
+            result["client_id"].nunique(),
+            out.resolve(),
+        )
+        return out
+
+    def _predict(self) -> Path:
+        df = self._load_dataframe()
+        self.model = self._build_model(df)
+        self.loader = self._build_loader(df)
+        rows = self._embed()
+        return self._save(rows)
 
 
 def main() -> Path:
-    return predict_window_embeddings()
+    return Predictor()()
 
 
 if __name__ == "__main__":

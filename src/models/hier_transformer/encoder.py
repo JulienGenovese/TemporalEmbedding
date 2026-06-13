@@ -94,6 +94,30 @@ class NumericNormalizer:
         out = (torch.log1p(x.clamp(min=0, max=self._clip_hi)) - self._mean) / self._std
         return out.masked_fill(mask, 0.0)
 
+    @property
+    def fitted(self) -> bool:
+        return self._fitted
+
+    def state_dict(self) -> dict:
+        """Plain-dict snapshot of the fitted statistics (checkpoint-friendly)."""
+        return {
+            "clip_pct": self.clip_pct,
+            "clip_hi": self._clip_hi,
+            "mean": self._mean,
+            "std": self._std,
+            "signed": self._signed,
+            "fitted": self._fitted,
+        }
+
+    def load_state_dict(self, state: dict) -> "NumericNormalizer":
+        self.clip_pct = state["clip_pct"]
+        self._clip_hi = state["clip_hi"]
+        self._mean = state["mean"]
+        self._std = state["std"]
+        self._signed = state["signed"]
+        self._fitted = state["fitted"]
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Primitive: frequency-bank encoder for continuous values

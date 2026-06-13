@@ -142,6 +142,7 @@ class Trainer:
         masks: dict[str, torch.Tensor] = {}
 
         for feat in self.model.features:
+            # TODO: capire perche' datetime non possa essere previsto
             if isinstance(feat, (HighCardCategoricalFeature, DatetimeFeature)):
                 continue
             name = feat.name
@@ -149,7 +150,7 @@ class Trainer:
                 targets[name] = feat.normalizer(batch[name])
             else:
                 targets[name] = batch[name].clone()
-
+            # decide quali posizioni mascherare
             m = torch.rand_like(batch[name], dtype=torch.float32) < self.args.mask_prob
             if pad_mask is not None:
                 m = m & ~pad_mask
@@ -158,22 +159,37 @@ class Trainer:
 
         return targets, masks
 
-    def _step(
+    def _forward_and_loss(
         self,
         batch: dict[str, torch.Tensor],
         client_ids: torch.Tensor,
-    ) -> dict:
+    ) -> tuple[dict, dict, torch.Tensor]:
+        """Shared forward path used by both training and evaluation.
+
+        Moves the batch to the device, builds the MTM targets/masks (which
+        also zeroes out masked positions in ``batch``), runs the model under
+        autocast and computes the combined loss.  Returns ``(output, losses,
+        client_ids)`` — the caller decides whether to backprop.
+        """
         batch = {k: v.to(self.device) for k, v in batch.items()}
         client_ids = client_ids.to(self.device)
 
         targets, mtm_mask = self._build_mtm_targets(batch)
 
-        self.optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=self.device_type, enabled=self.use_amp):
             output = self.model(batch)
-            output["temperature"] = self.model.backbone.contrastive_head.temperature
             losses = self.loss(output, targets, mtm_mask, client_ids)
-            loss = losses["loss"]
+
+        return output, losses, client_ids
+
+    def _step(
+        self,
+        batch: dict[str, torch.Tensor],
+        client_ids: torch.Tensor,
+    ) -> dict:
+        self.optimizer.zero_grad(set_to_none=True)
+        output, losses, client_ids = self._forward_and_loss(batch, client_ids)
+        loss = losses["loss"]
 
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
@@ -249,14 +265,7 @@ class Trainer:
         }
         with torch.no_grad():
             for batch, client_ids in loader:
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                client_ids = client_ids.to(self.device)
-                targets, mtm_mask = self._build_mtm_targets(batch)
-
-                with torch.autocast(device_type=self.device_type, enabled=self.use_amp):
-                    output = self.model(batch)
-                    output["temperature"] = self.model.backbone.contrastive_head.temperature
-                    losses = self.loss(output, targets, mtm_mask, client_ids)
+                output, losses, client_ids = self._forward_and_loss(batch, client_ids)
                 metrics = info_nce_metrics(output["contrastive_z"], client_ids)
 
                 agg["loss"].append(float(losses["loss"].item()))
