@@ -26,6 +26,27 @@ from src.config import config
 
 
 _SAMPLING_SECTION = "dataset.sampling"
+# Every synthetic dataset is materialised as two independent draws from the same
+# distributions: a `train` split and a `pred` split. Each split has its own
+# sub-section under `[dataset.sampling]` (volume + seed); `noise_level` stays on
+# the parent section so both splits share the same difficulty.
+SPLITS: tuple[str, ...] = ("train", "pred")
+_SPLIT_DEFAULTS: dict[str, dict[str, int | float]] = {
+    "train": {
+        "n_transactions": 400_000,
+        "n_clients": 4_000,
+        "alpha_dirichlet": 1.5,
+        "min_tx_per_client": 50,
+        "seed": 42,
+    },
+    "pred": {
+        "n_transactions": 100_000,
+        "n_clients": 1_000,
+        "alpha_dirichlet": 1.5,
+        "min_tx_per_client": 50,
+        "seed": 1234,
+    },
+}
 _LEGACY_GENERAL_SECTIONS = ("syntheticData.general", "synteticData.general")
 _EXPERIMENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "vanilla": (
@@ -45,63 +66,98 @@ _EXPERIMENT_SECTIONS: dict[str, tuple[str, ...]] = {
         "syntheticData.output.coherent",
         "synteticData.output.coherent",
     ),
-    "simple": (
-        "syntentic.simple",
-        "syntetic.simple",
-        "synthetic.simple",
-        "syntheticData.output.simple",
-        "synteticData.output.simple",
+    "simple_spatial": (
+        "syntentic.simple_spatial",
+        "syntetic.simple_spatial",
+        "synthetic.simple_spatial",
+        "syntheticData.output.simple_spatial",
+        "synteticData.output.simple_spatial",
     ),
-    "timing": (
-        "syntentic.timing",
-        "syntetic.timing",
-        "synthetic.timing",
-        "syntheticData.output.timing",
-        "synteticData.output.timing",
+    "simple_timing": (
+        "syntentic.simple_timing",
+        "syntetic.simple_timing",
+        "synthetic.simple_timing",
+        "syntheticData.output.simple_timing",
+        "synteticData.output.simple_timing",
     ),
 }
 _SUPPORTED_OUTPUT_EXTENSIONS = {".csv", ".parquet"}
+# Maps each experiment to its base output-path field on `OutputConfig`.
+_OUTPUT_EXPERIMENT_FIELDS: dict[str, str] = {
+    "vanilla": "vanilla_out_path",
+    "coherent": "coherent_out_path",
+    "simple_spatial": "simple_spatial_out_path",
+    "simple_timing": "simple_timing_out_path",
+}
 _MISSING = object()
 
 
-def _sampling_int(key: str, default: int) -> int:
-    """Read an integer value from the sampling config section.
+def _sampling_sections(split: str | None) -> tuple[str, ...]:
+    """Return the config sections to read a sampling key from, most specific first.
+
+    Input:
+        split: split name (`train`/`pred`) or None for the legacy flat section.
+    Output:
+        Tuple of dotted section paths tried in order; the split sub-section takes
+        precedence over the shared parent `[dataset.sampling]` section.
+    What it does:
+        Lets a split inherit any value not overridden under its own sub-section.
+    """
+    if split is None:
+        return (_SAMPLING_SECTION,)
+    return (f"{_SAMPLING_SECTION}.{split}", _SAMPLING_SECTION)
+
+
+def _sampling_int(key: str, default: int, split: str | None = None) -> int:
+    """Read an integer value from the (split-aware) sampling config section.
 
     Input:
         key: sampling config key.
-        default: fallback value if key is absent.
+        default: fallback value if key is absent in every candidate section.
+        split: optional split name selecting the `[dataset.sampling.<split>]` sub-section.
     Output:
         Integer config value.
     What it does:
-        Fetches and validates that the resolved value is an integer (not bool).
+        Walks the candidate sections (split sub-section, then parent) and returns
+        the first present value, validating it is an integer (not bool).
     """
-    try:
-        value = config.get(_SAMPLING_SECTION, key, default)
-    except KeyError:
-        value = default
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"`{_SAMPLING_SECTION}.{key}` must be an integer, got {type(value).__name__}.")
-    return value
+    for section in _sampling_sections(split):
+        try:
+            value = config.get(section, key, _MISSING)
+        except KeyError:
+            continue
+        if value is _MISSING:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"`{section}.{key}` must be an integer, got {type(value).__name__}.")
+        return value
+    return default
 
 
-def _sampling_float(key: str, default: float) -> float:
-    """Read a numeric value from the sampling config section.
+def _sampling_float(key: str, default: float, split: str | None = None) -> float:
+    """Read a numeric value from the (split-aware) sampling config section.
 
     Input:
         key: sampling config key.
-        default: fallback value if key is absent.
+        default: fallback value if key is absent in every candidate section.
+        split: optional split name selecting the `[dataset.sampling.<split>]` sub-section.
     Output:
         Float config value.
     What it does:
-        Fetches and validates numeric values (int/float, excluding bool).
+        Walks the candidate sections (split sub-section, then parent) and returns
+        the first present value, validating it is numeric (int/float, excluding bool).
     """
-    try:
-        value = config.get(_SAMPLING_SECTION, key, default)
-    except KeyError:
-        value = default
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"`{_SAMPLING_SECTION}.{key}` must be numeric, got {type(value).__name__}.")
-    return float(value)
+    for section in _sampling_sections(split):
+        try:
+            value = config.get(section, key, _MISSING)
+        except KeyError:
+            continue
+        if value is _MISSING:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(f"`{section}.{key}` must be numeric, got {type(value).__name__}.")
+        return float(value)
+    return default
 
 
 def _noise_level_float(default: float) -> float:
@@ -199,13 +255,40 @@ def _output_path(variant: str, key: str, default: Path) -> Path:
 
 @dataclass
 class SamplingConfig:
-    """Sampling volume and transaction allocation settings."""
+    """Sampling volume and transaction allocation settings for one split.
 
-    n_transactions: int = _sampling_int("n_transactions", 400_000)
-    n_clients: int = _sampling_int("n_clients", 4_000)
-    alpha_dirichlet: float = _sampling_float("alpha_dirichlet", 1.5)  # Smaller alpha => more skewed client activity.
-    min_tx_per_client: int = _sampling_int("min_tx_per_client", 50)
-    seed: int = _sampling_int("seed", 42)
+    A synthetic dataset is generated once per split (`train`/`pred`) from the same
+    distributions; only the volume and `seed` carried here differ between splits,
+    so the two files are independent draws of the same generative process.
+    """
+
+    n_transactions: int = 400_000
+    n_clients: int = 4_000
+    alpha_dirichlet: float = 1.5  # Smaller alpha => more skewed client activity.
+    min_tx_per_client: int = 50
+    seed: int = 42
+
+    @classmethod
+    def from_split(cls, split: str) -> "SamplingConfig":
+        """Build the sampling config for a split from `[dataset.sampling.<split>]`.
+
+        Input:
+            split: split name (`train` or `pred`).
+        Output:
+            SamplingConfig populated from the split sub-section, falling back to the
+            shared `[dataset.sampling]` section and then to per-split defaults.
+        What it does:
+            Reads each volume/seed key with split-aware precedence so the two splits
+            can differ in size and seed while sharing whatever is left on the parent.
+        """
+        defaults = _SPLIT_DEFAULTS.get(split, _SPLIT_DEFAULTS["train"])
+        return cls(
+            n_transactions=_sampling_int("n_transactions", int(defaults["n_transactions"]), split),
+            n_clients=_sampling_int("n_clients", int(defaults["n_clients"]), split),
+            alpha_dirichlet=_sampling_float("alpha_dirichlet", float(defaults["alpha_dirichlet"]), split),
+            min_tx_per_client=_sampling_int("min_tx_per_client", int(defaults["min_tx_per_client"]), split),
+            seed=_sampling_int("seed", int(defaults["seed"]), split),
+        )
 
 @dataclass
 class NoiseConfig:
@@ -294,14 +377,14 @@ class OutputConfig:
             "coherent", "out_path", Path("data") / "transactions_coherent.csv",
         ),
     )
-    simple_out_path: Path = field(
+    simple_spatial_out_path: Path = field(
         default_factory=lambda: _output_path(
-            "simple", "out_path", Path("data") / "transactions_simple.csv",
+            "simple_spatial", "out_path", Path("data") / "transactions_simple_spatial.csv",
         ),
     )
-    timing_out_path: Path = field(
+    simple_timing_out_path: Path = field(
         default_factory=lambda: _output_path(
-            "timing", "out_path", Path("data") / "transactions_timing.csv",
+            "simple_timing", "out_path", Path("data") / "transactions_simple_timing.csv",
         ),
     )
 
@@ -317,46 +400,81 @@ class OutputConfig:
         """
         self.vanilla_out_path = Path(self.vanilla_out_path)
         self.coherent_out_path = Path(self.coherent_out_path)
-        self.simple_out_path = Path(self.simple_out_path)
-        self.timing_out_path = Path(self.timing_out_path)
+        self.simple_spatial_out_path = Path(self.simple_spatial_out_path)
+        self.simple_timing_out_path = Path(self.simple_timing_out_path)
 
-    def path_for(self, experiment: str, noise_level: float) -> Path:
-        """Return output path for a given experiment variant.
+    def split_path(
+        self,
+        experiment: str,
+        split: str,
+        noise_level: float | None = None,
+    ) -> Path:
+        """Return the output path for one (experiment, split) combination.
 
         Input:
-            experiment: variant name (`vanilla` or `coherent`).
-            noise_level: global noise level used to suffix the output file name.
+            experiment: variant name (`vanilla`, `coherent`, `simple_spatial`,
+                `simple_timing`).
+            split: split name (`train` or `pred`) injected into the file stem.
+            noise_level: optional global noise level; when provided (vanilla/coherent)
+                it is appended to the stem so noise variants don't collide.
         Output:
-            Path where that variant should be saved.
+            Path where that experiment's split should be saved, e.g.
+            `data/transactions_vanilla_train_noise_0_90.csv` or
+            `data/transactions_simple_spatial_pred.csv`.
         What it does:
-            Selects the correct output field, injects the noise level in file name,
-            and validates supported variants.
+            Selects the base path for the experiment, validates the extension, and
+            builds `<stem>_<split>[_noise_<level>]<ext>`.
         """
-        if experiment == "vanilla":
-            base_path = self.vanilla_out_path
-        elif experiment == "coherent":
-            base_path = self.coherent_out_path
-        else:
+        try:
+            attr = _OUTPUT_EXPERIMENT_FIELDS[experiment]
+        except KeyError:
             raise ValueError(f"Unsupported synthetic experiment `{experiment}`.")
 
+        base_path: Path = getattr(self, attr)
         suffix = (base_path.suffix or ".csv").lower()
         if suffix not in _SUPPORTED_OUTPUT_EXTENSIONS:
             raise ValueError(
                 f"Unsupported output extension `{suffix}` for `{base_path}`. "
                 f"Supported: {sorted(_SUPPORTED_OUTPUT_EXTENSIONS)}.",
             )
-        noise_label = f"{max(0.0, min(1.0, float(noise_level))):.2f}".replace(".", "_")
-        return base_path.with_name(f"{base_path.stem}_noise_{noise_label}{suffix}")
+
+        stem = f"{base_path.stem}_{split}"
+        if noise_level is not None:
+            noise_label = f"{max(0.0, min(1.0, float(noise_level))):.2f}".replace(".", "_")
+            stem = f"{stem}_noise_{noise_label}"
+        return base_path.with_name(f"{stem}{suffix}")
 
 
 @dataclass
 class DatasetConfig:
-    """Top-level composition of all synthetic dataset config sections."""
+    """Top-level composition of all synthetic dataset config sections.
 
-    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    Sampling is split per generation target: `sampling_train` and `sampling_pred`
+    each carry their own volume + seed, while every other section (noise, merchants,
+    time, amount, categorical) defines the shared distributions both splits draw from.
+    """
+
+    sampling_train: SamplingConfig = field(default_factory=lambda: SamplingConfig.from_split("train"))
+    sampling_pred: SamplingConfig = field(default_factory=lambda: SamplingConfig.from_split("pred"))
     noise: NoiseConfig = field(default_factory=NoiseConfig)
     merchants: MerchantConfig = field(default_factory=MerchantConfig)
     time: TimeConfig = field(default_factory=TimeConfig)
     amount: AmountConfig = field(default_factory=AmountConfig)
     categorical: CategoricalConfig = field(default_factory=CategoricalConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+
+    def sampling_for(self, split: str) -> SamplingConfig:
+        """Return the sampling config for a split.
+
+        Input:
+            split: split name (`train` or `pred`).
+        Output:
+            The matching :class:`SamplingConfig`.
+        What it does:
+            Routes to the per-split sampling config, raising on unknown splits.
+        """
+        if split == "train":
+            return self.sampling_train
+        if split == "pred":
+            return self.sampling_pred
+        raise ValueError(f"Unsupported split `{split}`. Expected one of {SPLITS}.")

@@ -1,17 +1,19 @@
 """Timing-only validation dataset.
 
-A controlled probe for the time-aware part of the model: two clusters that are
+A controlled probe for the time-aware part of the model: four clusters that are
 **identical in everything that is embedded as a value** (amount distribution,
 merchant pool, cocau pool, transaction volume) and differ *only* in their
 temporal signature — the hour-of-day and day-of-week at which transactions
 happen.
 
-    Cluster A — "mattiniero_feriale": peak hour 09, peak Mon–Tue.
-    Cluster B — "serale_weekend":     peak hour 20, peak Fri–Sat.
+    Cluster A — "mattiniero_feriale":        peak hour 09, peak Mon–Tue.
+    Cluster B — "pranzo_infrasettimanale":   peak hour 13, peak Wed–Thu.
+    Cluster C — "serale_weekend":            peak hour 20, peak Fri–Sat.
+    Cluster D — "notturno_weekend":          peak hour 02, peak Sat–Sun.
 
 Because the spending profile is defined once on the dataset (a single
-``SharedProfile``) and shared by both clusters, the *only* signal separating
-them is timing. A model that recovers the two clusters from the resulting
+``SharedProfile``) and shared by every cluster, the *only* signal separating
+them is timing. A model that recovers the clusters from the resulting
 embeddings is genuinely exploiting ``delta_t`` / the timestamp decomposition;
 one that collapses them is blind to time. This makes the experiment a clean
 pass/fail validation of :class:`TimeAwarePositionalEncoding` and the datetime
@@ -34,7 +36,7 @@ import pandas as pd
 
 from ...constant import DATA_CONFIG
 from ..generators.merchant import MerchantConfig, _merchant_catalog
-from ..utils.config import DatasetConfig
+from ..utils.config import SPLITS, DatasetConfig
 from ..utils.entities import Merchant
 from .common import BaseSyntheticDataset
 
@@ -54,8 +56,8 @@ class SharedProfile:
         Frozen dataclass instance.
     What it does:
         Holds the non-temporal half of the data-generating process so that it is
-        physically impossible for two clusters to differ on amount/merchant/cocau
-        — they can only differ in their :class:`TimingSignature`.
+        physically impossible for any two clusters to differ on amount/merchant/
+        cocau — they can only differ in their :class:`TimingSignature`.
     """
 
     amount_mean: float
@@ -93,7 +95,7 @@ class TimingSignature:
 
 
 def shared_profile(merchants: MerchantConfig) -> SharedProfile:
-    """Build the single spending profile shared by both timing clusters.
+    """Build the single spending profile shared by all timing clusters.
 
     Input:
         merchants: merchant configuration providing themed name pools.
@@ -101,7 +103,7 @@ def shared_profile(merchants: MerchantConfig) -> SharedProfile:
         A :class:`SharedProfile` reused by every :class:`TimingSignature`.
     What it does:
         Picks a fixed, mixed merchant pool (groceries + payments) and a fixed
-        amount/volume level so that the two clusters are value-indistinguishable.
+        amount/volume level so that the clusters are value-indistinguishable.
     """
     catalog = _merchant_catalog(merchants)
     pool = [catalog[n] for n in merchants.groceries + merchants.payments]
@@ -116,33 +118,52 @@ def shared_profile(merchants: MerchantConfig) -> SharedProfile:
 
 
 def timing_signatures() -> list[TimingSignature]:
-    """Return the two timing-only clusters of the validation experiment.
+    """Return the four timing-only clusters of the validation experiment.
 
     Input:
         None.
     Output:
-        List with exactly two :class:`TimingSignature` objects.
+        List with exactly four :class:`TimingSignature` objects.
     What it does:
-        Encodes "mattiniero feriale" (morning, Mon–Tue) and "serale weekend"
-        (evening, Fri–Sat) as sharp, non-overlapping temporal fingerprints. The
-        day-of-week index follows ``datetime.weekday`` (0 = Monday … 6 = Sunday).
+        Encodes four sharp, non-overlapping temporal fingerprints that combine a
+        distinct peak hour with a distinct preferred pair of weekdays:
+        "mattiniero feriale" (morning, Mon–Tue), "pranzo infrasettimanale"
+        (midday, Wed–Thu), "serale weekend" (evening, Fri–Sat) and "notturno
+        weekend" (night, Sat–Sun). The day-of-week index follows
+        ``datetime.weekday`` (0 = Monday … 6 = Sunday).
     """
     return [
         TimingSignature(
             name="mattiniero_feriale",
-            n_clients=2000,
+            n_clients=1000,
             hour_peak=9.0,
             hour_width=2.0,
             #            Mon  Tue  Wed  Thu  Fri  Sat  Sun
             dow_weights=(1.0, 0.9, 0.5, 0.4, 0.3, 0.1, 0.1),
         ),
         TimingSignature(
+            name="pranzo_infrasettimanale",
+            n_clients=1000,
+            hour_peak=13.0,
+            hour_width=2.0,
+            #            Mon  Tue  Wed  Thu  Fri  Sat  Sun
+            dow_weights=(0.3, 0.4, 1.0, 0.9, 0.4, 0.1, 0.1),
+        ),
+        TimingSignature(
             name="serale_weekend",
-            n_clients=2000,
+            n_clients=1000,
             hour_peak=20.0,
             hour_width=2.0,
             #            Mon  Tue  Wed  Thu  Fri  Sat  Sun
             dow_weights=(0.1, 0.1, 0.3, 0.4, 0.9, 1.0, 0.6),
+        ),
+        TimingSignature(
+            name="notturno_weekend",
+            n_clients=1000,
+            hour_peak=2.0,
+            hour_width=2.0,
+            #            Mon  Tue  Wed  Thu  Fri  Sat  Sun
+            dow_weights=(0.1, 0.1, 0.1, 0.2, 0.4, 0.9, 1.0),
         ),
     ]
 
@@ -150,13 +171,14 @@ def timing_signatures() -> list[TimingSignature]:
 class TimingSyntheticTransactionDataset(BaseSyntheticDataset):
     """Build a timing-only synthetic dataset (clusters differ solely in time)."""
 
-    experiment = "timing"
+    experiment = "simple_timing"
 
     def __init__(
         self,
         config: DatasetConfig,
         profile: SharedProfile | None = None,
         signatures: list[TimingSignature] | None = None,
+        split: str = "train",
     ) -> None:
         """Initialize the timing dataset builder.
 
@@ -164,6 +186,8 @@ class TimingSyntheticTransactionDataset(BaseSyntheticDataset):
             config: full dataset configuration (sampling/time/output are used).
             profile: optional shared spending profile; defaults from merchant config.
             signatures: optional explicit timing clusters; defaults to the two-cluster probe.
+            split: sampling split to draw (`train` or `pred`); selects the per-split
+                seed so the two files are independent draws of the same signatures.
         Output:
             None.
         What it does:
@@ -171,12 +195,13 @@ class TimingSyntheticTransactionDataset(BaseSyntheticDataset):
             the RNG, and precomputes the day-of-week calendar over the horizon.
         """
         self.config = config
+        self.split = split
         self.data_config = DATA_CONFIG
         self.profile = profile if profile is not None else shared_profile(config.merchants)
         self.signatures = list(signatures) if signatures is not None else timing_signatures()
         if not self.signatures:
             raise ValueError("`signatures` cannot be empty.")
-        self._rng = np.random.default_rng(config.sampling.seed)
+        self._rng = np.random.default_rng(config.sampling_for(split).seed)
 
         time_cfg = config.time
         self._ts_base = int(time_cfg.ts_base)
@@ -336,33 +361,40 @@ class TimingSyntheticTransactionDataset(BaseSyntheticDataset):
         return df.sort_values(dc.transaction_sort_cols).reset_index(drop=True)
 
     def _output_path(self) -> Path:
-        """Resolve the timing-experiment output path from config."""
-        return self.config.output.timing_out_path
+        """Resolve the split-suffixed simple-timing output path from config."""
+        return self.config.output.split_path(self.experiment, self.split)
 
 
 def generate(
     config: DatasetConfig | None = None,
     profile: SharedProfile | None = None,
     signatures: list[TimingSignature] | None = None,
-) -> Path:
-    """Generate and save the timing-only validation dataset.
+) -> dict[str, Path]:
+    """Generate and save the simple-timing validation dataset for every split.
 
     Input:
         config: optional explicit dataset configuration.
         profile: optional shared spending profile.
         signatures: optional explicit timing cluster definitions.
     Output:
-        Path to the generated file.
+        Mapping of split name (`train`/`pred`) to the generated file path.
     What it does:
-        Resolves configuration, builds the timing dataset, and writes it to disk.
+        Resolves the shared profile/signatures once, then materialises one file per
+        split (`train` and `pred`) — independent draws from the same signatures.
     """
     resolved_config = config or DatasetConfig()
-    std = TimingSyntheticTransactionDataset(
-        config=resolved_config,
-        profile=profile,
-        signatures=signatures,
-    )
-    return std.generate_and_save()
+    shared_profile_obj = profile if profile is not None else shared_profile(resolved_config.merchants)
+    shared_signatures = signatures if signatures is not None else timing_signatures()
+    paths: dict[str, Path] = {}
+    for split in SPLITS:
+        std = TimingSyntheticTransactionDataset(
+            config=resolved_config,
+            profile=shared_profile_obj,
+            signatures=shared_signatures,
+            split=split,
+        )
+        paths[split] = std.generate_and_save()
+    return paths
 
 
 if __name__ == "__main__":

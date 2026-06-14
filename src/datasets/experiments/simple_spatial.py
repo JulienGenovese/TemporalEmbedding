@@ -30,7 +30,7 @@ import pandas as pd
 
 from ...constant import DATA_CONFIG
 from ..generators.merchant import MerchantConfig, _merchant_catalog
-from ..utils.config import DatasetConfig
+from ..utils.config import SPLITS, DatasetConfig
 from ..utils.entities import Merchant
 from .common import BaseSyntheticDataset
 
@@ -148,24 +148,28 @@ def simple_cluster_types(merchants: MerchantConfig) -> list[SimpleClientType]:
 class SimpleSyntheticTransactionDataset(BaseSyntheticDataset):
     """Build a simple synthetic transaction dataset from explicit clusters."""
 
-    experiment = "simple"
+    experiment = "simple_spatial"
 
     def __init__(
         self,
         config: DatasetConfig,
         client_types: list[SimpleClientType] | None = None,
+        split: str = "train",
     ) -> None:
         """Initialize the simple dataset builder.
 
         Input:
             config: full dataset configuration (sampling/time/output are used).
             client_types: optional explicit clusters; defaults from merchant config.
+            split: sampling split to draw (`train` or `pred`); selects the per-split
+                seed so the two files are independent draws of the same clusters.
         Output:
             None.
         What it does:
             Stores config, resolves clusters, and seeds the shared RNG.
         """
         self.config = config
+        self.split = split
         self.data_config = DATA_CONFIG
         self.client_types = (
             list(client_types)
@@ -174,7 +178,7 @@ class SimpleSyntheticTransactionDataset(BaseSyntheticDataset):
         )
         if not self.client_types:
             raise ValueError("`client_types` cannot be empty.")
-        self._rng = np.random.default_rng(config.sampling.seed)
+        self._rng = np.random.default_rng(config.sampling_for(split).seed)
 
         time_cfg = config.time
         self._ts_base = int(time_cfg.ts_base)
@@ -303,30 +307,40 @@ class SimpleSyntheticTransactionDataset(BaseSyntheticDataset):
         return df.sort_values(dc.transaction_sort_cols).reset_index(drop=True)
 
     def _output_path(self) -> Path:
-        """Resolve the simple-experiment output path from config."""
-        return self.config.output.simple_out_path
+        """Resolve the split-suffixed simple-spatial output path from config."""
+        return self.config.output.split_path(self.experiment, self.split)
 
 
 def generate(
     config: DatasetConfig | None = None,
     client_types: list[SimpleClientType] | None = None,
-) -> Path:
-    """Generate and save the simple synthetic dataset.
+) -> dict[str, Path]:
+    """Generate and save the simple-spatial synthetic dataset for every split.
 
     Input:
         config: optional explicit dataset configuration.
         client_types: optional explicit cluster definitions.
     Output:
-        Path to the generated file.
+        Mapping of split name (`train`/`pred`) to the generated file path.
     What it does:
-        Resolves configuration, builds the simple dataset, and writes it to disk.
+        Resolves the cluster definitions once, then materialises one file per split
+        (`train` and `pred`) — independent draws from the same clusters.
     """
     resolved_config = config or DatasetConfig()
-    std = SimpleSyntheticTransactionDataset(
-        config=resolved_config,
-        client_types=client_types,
+    shared_client_types = (
+        client_types
+        if client_types is not None
+        else simple_cluster_types(resolved_config.merchants)
     )
-    return std.generate_and_save()
+    paths: dict[str, Path] = {}
+    for split in SPLITS:
+        std = SimpleSyntheticTransactionDataset(
+            config=resolved_config,
+            client_types=shared_client_types,
+            split=split,
+        )
+        paths[split] = std.generate_and_save()
+    return paths
 
 
 if __name__ == "__main__":

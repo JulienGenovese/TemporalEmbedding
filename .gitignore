@@ -13,6 +13,5 @@ wheels/
 data/
 checkpoints/
 runs/
-notebooks/*
 improvement.md
 bug.md

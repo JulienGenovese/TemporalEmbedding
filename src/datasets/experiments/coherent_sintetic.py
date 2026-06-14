@@ -9,7 +9,7 @@ import numpy as np
 from ..generators.abc import Generator
 from ..generators.transactions import CoherentAmountGenerator
 from .common import AmountGeneratorBuilder, SyntheticTransactionDatasetCore
-from ..utils.config import DatasetConfig
+from ..utils.config import SPLITS, DatasetConfig
 from ..utils.entities import ClientType
 
 
@@ -79,6 +79,7 @@ class CoherentSyntheticTransactionDataset(SyntheticTransactionDatasetCore):
         config: DatasetConfig,
         client_types: list[ClientType] | None = None,
         merchant_amount_weight: float | None = None,
+        split: str = "train",
     ) -> None:
         """Initialize coherent synthetic dataset builder.
 
@@ -87,6 +88,7 @@ class CoherentSyntheticTransactionDataset(SyntheticTransactionDatasetCore):
             client_types: optional explicit client cluster definitions.
             merchant_amount_weight: optional merchant contribution override.
                 If omitted, reads from `config.amount.merchant_amount_weight`.
+            split: sampling split to draw (`train` or `pred`).
         Output:
             None.
         What it does:
@@ -99,6 +101,7 @@ class CoherentSyntheticTransactionDataset(SyntheticTransactionDatasetCore):
             amount_generator_builder=_coherent_amount_builder(resolved_weight),
             amount_requires_merchant=True,
             experiment="coherent",
+            split=split,
         )
 
 
@@ -106,8 +109,8 @@ def generate(
     merchant_amount_weight: float | None = None,
     config: DatasetConfig | None = None,
     client_types: list[ClientType] | None = None,
-) -> Path:
-    """Generate and save the coherent synthetic dataset.
+) -> dict[str, Path]:
+    """Generate and save the coherent synthetic dataset for every split.
 
     Input:
         merchant_amount_weight: optional merchant contribution override.
@@ -115,17 +118,22 @@ def generate(
         config: optional explicit dataset configuration.
         client_types: optional explicit client cluster definitions.
     Output:
-        Path to the generated CSV file.
+        Mapping of split name (`train`/`pred`) to the generated file path.
     What it does:
-        Creates config, builds coherent dataset variant, and saves it to disk.
+        Materialises one file per split (`train` and `pred`) — independent draws
+        from the same coherent distributions.
     """
     resolved_config = config or DatasetConfig()
-    std = CoherentSyntheticTransactionDataset(
-        config=resolved_config,
-        client_types=client_types,
-        merchant_amount_weight=merchant_amount_weight,
-    )
-    return std.generate_and_save()
+    paths: dict[str, Path] = {}
+    for split in SPLITS:
+        std = CoherentSyntheticTransactionDataset(
+            config=resolved_config,
+            client_types=client_types,
+            merchant_amount_weight=merchant_amount_weight,
+            split=split,
+        )
+        paths[split] = std.generate_and_save()
+    return paths
 
 
 if __name__ == "__main__":

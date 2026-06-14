@@ -204,6 +204,7 @@ class BaseSyntheticDataset(Build):
     """
 
     experiment: str = "base"
+    split: str = "train"
     data_config: DataConfig = DATA_CONFIG
     config: DatasetConfig
 
@@ -251,11 +252,12 @@ class BaseSyntheticDataset(Build):
 
         per_client = df.groupby(self.data_config.client_col).size()
         logger.info(
-            "Saved {:,} rows × {} cols → {} (experiment={}{})",
+            "Saved {:,} rows × {} cols → {} (experiment={}, split={}{})",
             len(df),
             len(df_to_save.columns),
             out_path,
             self.experiment,
+            self.split,
             self._log_context(),
         )
         logger.info(
@@ -282,6 +284,7 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
         amount_generator_builder: AmountGeneratorBuilder | None = None,
         amount_requires_merchant: bool = False,
         experiment: str = "vanilla",
+        split: str = "train",
     ) -> None:
         """Initialize the dataset core and all component generators.
 
@@ -292,6 +295,8 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
             amount_generator_builder: factory for amount generator implementation.
             amount_requires_merchant: whether amount generation depends on merchant.
             experiment: output variant name (`vanilla` or `coherent`).
+            split: which sampling split to draw (`train` or `pred`); selects the
+                per-split volume/seed while every distribution stays shared.
         Output:
             None.
         What it does:
@@ -303,6 +308,8 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
 
         self.config = config
         self.experiment = experiment
+        self.split = split
+        self.sampling = config.sampling_for(split)
         self.data_config = DATA_CONFIG
         self.client_types = (
             list(client_types)
@@ -311,7 +318,7 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
         )
         if not self.client_types:
             raise ValueError("`client_types` cannot be empty.")
-        self.seed = config.sampling.seed
+        self.seed = self.sampling.seed
         rng = np.random.default_rng(self.seed)
         self._rng = rng
 
@@ -320,7 +327,7 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
             lambda amount_rng, dataset_cfg: AmountGenerator(amount_rng, dataset_cfg.amount)
         )
 
-        self._count_allocator: Generator = TransactionCountAllocator(rng, config.sampling)
+        self._count_allocator: Generator = TransactionCountAllocator(rng, self.sampling)
         self._cluster_assigner: Generator = ClusterToClientGenerator(rng, self.client_types)
         self._client_gen = ClientTransactionGenerator(
             rng=rng,
@@ -347,7 +354,7 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
             Allocates per-client transaction counts, assigns cluster types,
             generates each client's rows, and returns a sorted DataFrame.
         """
-        sampling = self.config.sampling
+        sampling = self.sampling
         noise_level = self.config.noise.noise_level
 
         counts = self._count_allocator.generate(sampling.n_transactions, sampling.n_clients)
@@ -362,8 +369,10 @@ class SyntheticTransactionDatasetCore(BaseSyntheticDataset):
         return df.sort_values(self.data_config.transaction_sort_cols).reset_index(drop=True)
 
     def _output_path(self) -> Path:
-        """Resolve the noise-suffixed output path for this variant."""
-        return self.config.output.path_for(self.experiment, self.config.noise.noise_level)
+        """Resolve the split- and noise-suffixed output path for this variant."""
+        return self.config.output.split_path(
+            self.experiment, self.split, self.config.noise.noise_level,
+        )
 
     def _prepare_for_save(self, df: pd.DataFrame) -> pd.DataFrame:
         """Attach the `noise_level` column consumed downstream."""

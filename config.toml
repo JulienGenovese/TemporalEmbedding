@@ -1,10 +1,23 @@
 [dataset.sampling]
+# Shared by both splits (same distributions / difficulty).
+noise_level = 0.9
+
+# Two independent draws from the same distributions: a larger `train` split and a
+# smaller `pred` split (different seed so the sampled clients differ).
+[dataset.sampling.train]
 n_transactions = 400000
 n_clients = 4000
 alpha_dirichlet = 1.5
 min_tx_per_client = 50
 seed = 42
-noise_level = 0.9
+
+[dataset.sampling.pred]
+n_transactions = 100000
+n_clients = 1000
+alpha_dirichlet = 1.5
+min_tx_per_client = 50
+seed = 1234
+
 [syntentic.vanilla]
 folder = "data"
 name_file = "transactions_vanilla"
@@ -16,13 +29,13 @@ folder = "data"
 name_file = "transactions_coherent"
 ext = ".csv"
 
-[syntentic.simple]
+[syntentic.simple_spatial]
 folder = "data"
-name_file = "transactions_simple"
+name_file = "transactions_simple_spatial"
 ext = ".csv"
 
 [model.hierTransformer.paths]
-train_path = "data/transactions_coherent_noise_0_30.csv"
+train_path = "data/transactions_simple_spatial_train.csv"
 pred_path = "data/pred"
 pred_file_name = "pred_embeddings.csv"
 ckpt_dir = "checkpoints"

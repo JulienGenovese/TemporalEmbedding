@@ -15,7 +15,7 @@ from ..generators.transactions import (
     AmountGenerator,
 )
 from .common import SyntheticTransactionDatasetCore
-from ..utils.config import DatasetConfig
+from ..utils.config import SPLITS, DatasetConfig
 
 
 def default_amount_generator_builder(
@@ -42,12 +42,14 @@ class VanillaSyntheticTransactionDataset(SyntheticTransactionDatasetCore):
         self,
         config: DatasetConfig,
         client_types: list[ClientType] | None = None,
+        split: str = "train",
     ) -> None:
         """Initialize vanilla synthetic dataset builder.
 
         Input:
             config: full dataset configuration.
             client_types: optional explicit client cluster definitions.
+            split: sampling split to draw (`train` or `pred`).
         Output:
             None.
         What it does:
@@ -59,32 +61,39 @@ class VanillaSyntheticTransactionDataset(SyntheticTransactionDatasetCore):
             amount_generator_builder=default_amount_generator_builder,
             amount_requires_merchant=False,
             experiment="vanilla",
+            split=split,
         )
 
 def generate(
     config: DatasetConfig | None = None,
     client_types: list[ClientType] | None = None,
-) -> Path:
-    """Generate and save the vanilla synthetic dataset.
+) -> dict[str, Path]:
+    """Generate and save the vanilla synthetic dataset for every split.
 
     Input:
         config: optional explicit dataset configuration.
         client_types: optional explicit client cluster definitions.
     Output:
-        Path to the generated CSV file.
+        Mapping of split name (`train`/`pred`) to the generated file path.
     What it does:
-        Creates default config and clusters, builds the dataset, then saves it.
+        Builds the cluster definitions once, then materialises one file per split
+        (`train` and `pred`) — independent draws from the same distributions.
     """
     resolved_config = config or DatasetConfig()
-    std = VanillaSyntheticTransactionDataset(
-        config=resolved_config,
-        client_types=(
-            client_types
-            if client_types is not None
-            else cluster_types(resolved_config.merchants)
-        ),
+    shared_client_types = (
+        client_types
+        if client_types is not None
+        else cluster_types(resolved_config.merchants)
     )
-    return std.generate_and_save()
+    paths: dict[str, Path] = {}
+    for split in SPLITS:
+        std = VanillaSyntheticTransactionDataset(
+            config=resolved_config,
+            client_types=shared_client_types,
+            split=split,
+        )
+        paths[split] = std.generate_and_save()
+    return paths
 
 
 if __name__ == "__main__":
