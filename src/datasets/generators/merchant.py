@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import numpy as np
 from dataclasses import dataclass, field
-from .abc import Generator
 from ..utils.entities import Merchant
 
 
@@ -93,51 +91,3 @@ def merchant_pool() -> list[Merchant]:
     """
     catalog = _merchant_catalog(MerchantConfig())
     return catalog
-    
-    
-class MerchantSelector(Generator):
-    """Hierarchical merchant selector used for each generated transaction."""
-
-    def __init__(self, rng: np.random.Generator, merchants: MerchantConfig, p_global: float) -> None:
-        """Prepare merchant pools and probabilities for selection.
-
-        Input:
-            rng: NumPy random generator.
-            merchants: merchant configuration and metadata source.
-            p_global: probability of selecting from the full global pool.
-        Output:
-            None.
-        What it does:
-            Caches catalog, full pool, common pool, and selection probabilities.
-        """
-        self._rng = rng
-        self._catalog = _merchant_catalog(merchants)
-        self._pool = [self._catalog[m] for m in merchants.merchant_pool if m in self._catalog]
-        self._common = [self._catalog[m] for m in merchants.common_merchants if m in self._catalog]
-        self._p_common = merchants.p_common_merchant
-        self._p_global = p_global
-
-    def generate(self, off: bool, cluster_pool: list[Merchant], fav_merchants: np.ndarray) -> Merchant:
-        """Select a merchant for one transaction.
-
-        Input:
-            off: whether the transaction is off-pattern for the client.
-            cluster_pool: merchants associated with the client's cluster.
-            fav_merchants: client fingerprint favorite merchants.
-        Output:
-            Selected Merchant instance.
-        What it does:
-            Applies a hierarchical strategy:
-            1) optional common merchant,
-            2) fallback to global pool if cluster is empty,
-            3) global pool for off-pattern/global events,
-            4) otherwise preference-weighted favorite vs cluster selection.
-        """
-        if self._common and self._rng.random() < self._p_common:
-            return self._rng.choice(self._common)
-        if not cluster_pool:
-            return self._rng.choice(self._pool)
-        if off or self._rng.random() < self._p_global:
-            return self._rng.choice(self._pool)
-        merchant = self._rng.choice(fav_merchants) if self._rng.random() < 0.7 else self._rng.choice(cluster_pool)
-        return merchant if isinstance(merchant, Merchant) else self._catalog[str(merchant)]

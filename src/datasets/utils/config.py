@@ -3,12 +3,9 @@
 """Configuration for synthetic dataset generation, split by subsystem.
 
 This module defines:
-  - SamplingConfig: dataset size and per-client allocation controls
-  - NoiseConfig: single difficulty knob and derived noise dials
+  - SamplingConfig: dataset size and per-client allocation controls (per split)
   - MerchantConfig: themed and shared merchant pools
   - TimeConfig: time origin and granularity constants
-  - AmountConfig: amount distribution controls
-  - CategoricalConfig: categorical ranges and noise controls
   - OutputConfig: output paths by experiment variant
 
 DatasetConfig composes all sections and acts as the entry configuration object.
@@ -28,8 +25,7 @@ from src.config import config
 _SAMPLING_SECTION = "dataset.sampling"
 # Every synthetic dataset is materialised as two independent draws from the same
 # distributions: a `train` split and a `pred` split. Each split has its own
-# sub-section under `[dataset.sampling]` (volume + seed); `noise_level` stays on
-# the parent section so both splits share the same difficulty.
+# sub-section under `[dataset.sampling]` (volume + seed).
 SPLITS: tuple[str, ...] = ("train", "pred")
 _SPLIT_DEFAULTS: dict[str, dict[str, int | float]] = {
     "train": {
@@ -47,25 +43,7 @@ _SPLIT_DEFAULTS: dict[str, dict[str, int | float]] = {
         "seed": 1234,
     },
 }
-_LEGACY_GENERAL_SECTIONS = ("syntheticData.general", "synteticData.general")
 _EXPERIMENT_SECTIONS: dict[str, tuple[str, ...]] = {
-    "vanilla": (
-        "syntentic.vanilla",
-        "syntetic.vanilla",
-        "synthetic.vanilla",
-        "syntheticData.output.vanilla",
-        "synteticData.output.vanilla",
-    ),
-    "coherent": (
-        "syntentic.coherent",
-        "syntetic.coherent",
-        "synthetic.coherent",
-        "syntentic.cohernet",
-        "syntetic.cohernet",
-        "synthetic.cohernet",
-        "syntheticData.output.coherent",
-        "synteticData.output.coherent",
-    ),
     "simple_spatial": (
         "syntentic.simple_spatial",
         "syntetic.simple_spatial",
@@ -80,14 +58,20 @@ _EXPERIMENT_SECTIONS: dict[str, tuple[str, ...]] = {
         "syntheticData.output.simple_timing",
         "synteticData.output.simple_timing",
     ),
+    "simple_delta": (
+        "syntentic.simple_delta",
+        "syntetic.simple_delta",
+        "synthetic.simple_delta",
+        "syntheticData.output.simple_delta",
+        "synteticData.output.simple_delta",
+    ),
 }
 _SUPPORTED_OUTPUT_EXTENSIONS = {".csv", ".parquet"}
 # Maps each experiment to its base output-path field on `OutputConfig`.
 _OUTPUT_EXPERIMENT_FIELDS: dict[str, str] = {
-    "vanilla": "vanilla_out_path",
-    "coherent": "coherent_out_path",
     "simple_spatial": "simple_spatial_out_path",
     "simple_timing": "simple_timing_out_path",
+    "simple_delta": "simple_delta_out_path",
 }
 _MISSING = object()
 
@@ -160,43 +144,11 @@ def _sampling_float(key: str, default: float, split: str | None = None) -> float
     return default
 
 
-def _noise_level_float(default: float) -> float:
-    """Read `noise_level`, prioritizing dataset.sampling."""
-    try:
-        value = config.get(_SAMPLING_SECTION, "noise_level", _MISSING)
-    except KeyError:
-        value = _MISSING
-    if value is not _MISSING:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError(f"`{_SAMPLING_SECTION}.noise_level` must be numeric, got {type(value).__name__}.")
-        return float(value)
-    return _coherent_float("noise_level", default)
-
-
-def _coherent_float(key: str, default: float) -> float:
-    """Read a numeric value for coherent synthetic generation settings."""
-    sections = (
-        *_EXPERIMENT_SECTIONS["coherent"],
-        *_LEGACY_GENERAL_SECTIONS,
-    )
-    for section in sections:
-        try:
-            value = config.get(section, key, _MISSING)
-        except KeyError:
-            continue
-        if value is _MISSING:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise TypeError(f"`{section}.{key}` must be numeric, got {type(value).__name__}.")
-        return float(value)
-    return float(default)
-
-
 def _output_path(variant: str, key: str, default: Path) -> Path:
     """Read and normalize an output path from config.
 
     Input:
-        variant: experiment variant name (for example `vanilla`/`coherent`).
+        variant: experiment variant name (for example `simple_spatial`).
         key: output key inside the variant section.
         default: fallback path when config key is missing.
     Output:
@@ -290,38 +242,6 @@ class SamplingConfig:
             seed=_sampling_int("seed", int(defaults["seed"]), split),
         )
 
-@dataclass
-class NoiseConfig:
-    """Difficulty subsystem controlled by a single `noise_level` in [0, 1]."""
-
-    noise_level: float = field(default_factory=lambda: _noise_level_float(0.9))
-    # 0 = clean/separable, 1 = high noise
-
-    p_offpattern: float = field(init=False)  # Probability of ignoring client fingerprint.
-    p_global_merchant: float = field(init=False)  # Probability of drawing merchant from global pool.
-    p_refund: float = field(init=False)  # Probability of partial refund after debit.
-    sigma_spending: float = field(init=False)  # Sigma for client fingerprint spending perturbation.
-
-    def __post_init__(self) -> None:
-        """Derive all noise dials from `noise_level`.
-
-        Input:
-            None.
-        Output:
-            None.
-        What it does:
-            Clamps `noise_level` to [0, 1] and computes derived probabilities
-            and spending-noise sigma used by other generators.
-        """
-        self.noise_level = max(0.0, min(1.0, float(self.noise_level)))
-        self.p_offpattern = 0.2 * self.noise_level
-        self.p_global_merchant = 0.3 * self.noise_level
-        self.p_refund = 0.05 * self.noise_level
-        self.sigma_spending = 0.3 + 0.4 * self.noise_level
-
-
-
-
 
 @dataclass
 class TimeConfig:
@@ -333,50 +253,9 @@ class TimeConfig:
 
 
 @dataclass
-class AmountConfig:
-    """Amount distribution settings (signed lognormal)."""
-
-    spending_probability: float = 0.85  # Probability that transaction is debit (sign < 0)
-    lognormal_sigma: float = 1.0  # Lognormal sigma for amount magnitude
-    merchant_amount_weight: float = field(
-        default_factory=lambda: _coherent_float("merchant_amount_weight", 0.5),
-    )
-    # Weight in [0, 1] for coherent mode amount blend:
-    # 0.0 = client-driven only, 1.0 = merchant-driven only.
-
-    def __post_init__(self) -> None:
-        """Validate coherent-amount blend weight read from configuration."""
-        self.merchant_amount_weight = float(self.merchant_amount_weight)
-        if not 0.0 <= self.merchant_amount_weight <= 1.0:
-            raise ValueError("`syntentic.coherent.merchant_amount_weight` must be in [0, 1].")
-
-
-@dataclass
-class CategoricalConfig:
-    """Categorical feature vocabulary and noise settings.
-
-    `cocau_vocab` uses right-exclusive bounds, where 0 is padding.
-    `p_noise` defines base categorical noise rate.
-    """
-
-    cocau_vocab: tuple[int, int] = (0, 501)
-    p_noise: float = 0.15
-
-
-@dataclass
 class OutputConfig:
     """Output base paths for each experiment variant."""
 
-    vanilla_out_path: Path = field(
-        default_factory=lambda: _output_path(
-            "vanilla", "out_path", Path("data") / "transactions_vanilla.csv",
-        ),
-    )
-    coherent_out_path: Path = field(
-        default_factory=lambda: _output_path(
-            "coherent", "out_path", Path("data") / "transactions_coherent.csv",
-        ),
-    )
     simple_spatial_out_path: Path = field(
         default_factory=lambda: _output_path(
             "simple_spatial", "out_path", Path("data") / "transactions_simple_spatial.csv",
@@ -385,6 +264,11 @@ class OutputConfig:
     simple_timing_out_path: Path = field(
         default_factory=lambda: _output_path(
             "simple_timing", "out_path", Path("data") / "transactions_simple_timing.csv",
+        ),
+    )
+    simple_delta_out_path: Path = field(
+        default_factory=lambda: _output_path(
+            "simple_delta", "out_path", Path("data") / "transactions_simple_delta.csv",
         ),
     )
 
@@ -398,32 +282,22 @@ class OutputConfig:
         What it does:
             Converts output path fields to `Path` for consistent downstream use.
         """
-        self.vanilla_out_path = Path(self.vanilla_out_path)
-        self.coherent_out_path = Path(self.coherent_out_path)
         self.simple_spatial_out_path = Path(self.simple_spatial_out_path)
         self.simple_timing_out_path = Path(self.simple_timing_out_path)
+        self.simple_delta_out_path = Path(self.simple_delta_out_path)
 
-    def split_path(
-        self,
-        experiment: str,
-        split: str,
-        noise_level: float | None = None,
-    ) -> Path:
+    def split_path(self, experiment: str, split: str) -> Path:
         """Return the output path for one (experiment, split) combination.
 
         Input:
-            experiment: variant name (`vanilla`, `coherent`, `simple_spatial`,
-                `simple_timing`).
+            experiment: variant name (`simple_spatial`, `simple_timing`, `simple_delta`).
             split: split name (`train` or `pred`) injected into the file stem.
-            noise_level: optional global noise level; when provided (vanilla/coherent)
-                it is appended to the stem so noise variants don't collide.
         Output:
             Path where that experiment's split should be saved, e.g.
-            `data/transactions_vanilla_train_noise_0_90.csv` or
             `data/transactions_simple_spatial_pred.csv`.
         What it does:
             Selects the base path for the experiment, validates the extension, and
-            builds `<stem>_<split>[_noise_<level>]<ext>`.
+            builds `<stem>_<split><ext>`.
         """
         try:
             attr = _OUTPUT_EXPERIMENT_FIELDS[experiment]
@@ -438,11 +312,7 @@ class OutputConfig:
                 f"Supported: {sorted(_SUPPORTED_OUTPUT_EXTENSIONS)}.",
             )
 
-        stem = f"{base_path.stem}_{split}"
-        if noise_level is not None:
-            noise_label = f"{max(0.0, min(1.0, float(noise_level))):.2f}".replace(".", "_")
-            stem = f"{stem}_noise_{noise_label}"
-        return base_path.with_name(f"{stem}{suffix}")
+        return base_path.with_name(f"{base_path.stem}_{split}{suffix}")
 
 
 @dataclass
@@ -450,17 +320,14 @@ class DatasetConfig:
     """Top-level composition of all synthetic dataset config sections.
 
     Sampling is split per generation target: `sampling_train` and `sampling_pred`
-    each carry their own volume + seed, while every other section (noise, merchants,
-    time, amount, categorical) defines the shared distributions both splits draw from.
+    each carry their own volume + seed, while every other section (merchants, time)
+    defines the shared distributions both splits draw from.
     """
 
     sampling_train: SamplingConfig = field(default_factory=lambda: SamplingConfig.from_split("train"))
     sampling_pred: SamplingConfig = field(default_factory=lambda: SamplingConfig.from_split("pred"))
-    noise: NoiseConfig = field(default_factory=NoiseConfig)
     merchants: MerchantConfig = field(default_factory=MerchantConfig)
     time: TimeConfig = field(default_factory=TimeConfig)
-    amount: AmountConfig = field(default_factory=AmountConfig)
-    categorical: CategoricalConfig = field(default_factory=CategoricalConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
 
     def sampling_for(self, split: str) -> SamplingConfig:

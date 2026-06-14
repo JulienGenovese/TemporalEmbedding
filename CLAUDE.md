@@ -14,9 +14,10 @@ The canonical entrypoint is the **`py` Typer CLI** (`cli.py`, exposed as the `py
 # Install / sync dependencies
 uv sync
 
-# Generate a synthetic CSV dataset under data/ (~400k rows / 4000 clients)
-uv run py syntetic --type vanilla     # i.i.d. amounts
-uv run py syntetic --type coherent    # merchant-correlated amounts
+# Generate synthetic CSV datasets under data/ (each emits a train + pred split)
+uv run py syntetic --type simple_spatial   # clusters differ in amount/merchant/cocau + gap rate
+uv run py syntetic --type simple_timing    # clusters differ only in hour-of-day / day-of-week
+uv run py syntetic --type simple_delta     # clusters differ only in the inter-transaction gap rate λ
 
 # Full end-to-end pre-training (MTM + InfoNCE) — CPU-friendly defaults
 uv run py train --type hier
@@ -57,8 +58,8 @@ src/
   constant.py                       DataConfig — canonical column names
   datasets/                         synthetic data generation
     main.py                           generate(dataset_type) dispatcher
-    experiments/{vanilla,coherent_sintetic,common}.py
-    generators/{cluster,merchant,timestamp,transactions,abc}.py
+    experiments/{simple_spatial,simple_timing,simple_delta,common}.py
+    generators/{merchant,abc}.py
     utils/{config,entities}.py
   models/
     hier_transformer/              the model + training/prediction pipeline
@@ -167,7 +168,7 @@ needed — `TransactionEncoder`, `FieldTransformer`, and `MTMHead` all adapt aut
 ## Synthetic data pipeline
 
 ```
-src/datasets/  ──▶  data/transactions_<vanilla|coherent>*.csv  (~400k rows, 4000 clients)
+src/datasets/  ──▶  data/transactions_<experiment>_<train|pred>.csv  (~400k rows, 4000 clients)
    (py syntetic --type ...)        │
                                    ▼
 src/models/hier_transformer/data.py
@@ -199,9 +200,11 @@ tensorising.
 it. `_fit_features` only fits `NumericNormalizer`s; categorical vocab sizes stay at the explicit
 values in `DEFAULT_FEATURES` (the synthetic generator stays inside those ranges).
 
-`generate(dataset_type)` (`src/datasets/main.py`) dispatches to `experiments/vanilla.py` or
-`experiments/coherent_sintetic.py`; the coherent variant correlates amounts with merchant via
-`merchant_amount_weight`. Sampling parameters live under `[dataset.sampling]` in `config.toml`.
+`generate(dataset_type)` (`src/datasets/main.py`) dispatches to `experiments/simple_spatial.py`,
+`experiments/simple_timing.py` or `experiments/simple_delta.py`. Each `generate()` emits **two files
+from the same distributions** — a `train` and a `pred` split — differing only in volume/seed.
+Sampling parameters live under `[dataset.sampling.train]` / `[dataset.sampling.pred]` in
+`config.toml`.
 
 ## Prediction
 

@@ -1,7 +1,3 @@
-[dataset.sampling]
-# Shared by both splits (same distributions / difficulty).
-noise_level = 0.9
-
 # Two independent draws from the same distributions: a larger `train` split and a
 # smaller `pred` split (different seed so the sampled clients differ).
 [dataset.sampling.train]
@@ -18,20 +14,14 @@ alpha_dirichlet = 1.5
 min_tx_per_client = 50
 seed = 1234
 
-[syntentic.vanilla]
-folder = "data"
-name_file = "transactions_vanilla"
-ext = ".csv"
-
-[syntentic.coherent]
-merchant_amount_weight = 0.5
-folder = "data"
-name_file = "transactions_coherent"
-ext = ".csv"
-
 [syntentic.simple_spatial]
 folder = "data"
 name_file = "transactions_simple_spatial"
+ext = ".csv"
+
+[syntentic.simple_delta]
+folder = "data"
+name_file = "transactions_simple_delta"
 ext = ".csv"
 
 [model.hierTransformer.paths]

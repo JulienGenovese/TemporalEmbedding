@@ -1,8 +1,7 @@
 """Simple, self-contained synthetic transaction dataset.
 
-Unlike :mod:`vanilla`/`coherent` (which share the feature-rich
-``SyntheticTransactionDatasetCore``), this experiment is intentionally minimal:
-every cluster is defined explicitly by its amount mean/variance, transaction-count
+This experiment is intentionally minimal and fully self-contained: every cluster
+is defined explicitly by its amount mean/variance, transaction-count
 mean/variance, preferred merchants, preferred cocau, and a single temporal
 parameter — the inter-transaction **gap rate** ``λ``.
 
@@ -14,10 +13,9 @@ Temporal model (the cluster discriminator lives entirely in the gap):
     per-cluster temporal parameter. Timestamps are the cumulative sum of those
     gaps, so the model's ``delta_t`` is exponential with a cluster-specific rate.
 
-Merchant logic mirrors ``coherent``: the merchant carries its own cocau (intersected
-with the cluster's preferred codes) and the transaction amount is the mean of the
-cluster and merchant amount distributions, so its sign emerges naturally from the
-underlying normals.
+Each merchant carries its own cocau (intersected with the cluster's preferred
+codes) and the transaction amount is the mean of the cluster and merchant amount
+distributions, so its sign emerges naturally from the underlying normals.
 """
 
 from __future__ import annotations
@@ -121,14 +119,14 @@ def simple_cluster_types(merchants: MerchantConfig) -> list[SimpleClientType]:
             name="altospendente",
             cluster_prob=0.20,
             n_clients=800,
-            amount_mean=200.0,
-            amount_std=220.0,
+            amount_mean=50.0,
+            amount_std=100.0,
             n_tx_mean=50.0,
             n_tx_std=15.0,
             merchants=pool(merchants.shopping + merchants.travel),
             preferred_cocau=(33, 52, 71, 90, 109, 120, 128, 147, 166, 185, 210, 230, 252, 274, 296),
             gap_lambda=0.0833,  # mean gap ≈ 12 days (infrequent)
-            negative_only=True,  # this cluster makes debits only (amount < 0)
+            negative_only=False,  # this cluster makes debits only (amount < 0)
         ),
         SimpleClientType(
             name="mattiniero_utenze",

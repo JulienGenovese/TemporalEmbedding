@@ -12,7 +12,7 @@ app = typer.Typer(add_completion=False)
 
 
 def _syntetic(
-    dataset_type: Literal["vanilla", "coherent", "simple_spatial", "simple_timing"],
+    dataset_type: Literal["simple_spatial", "simple_timing", "simple_delta"],
 ) -> dict[str, Path]:
     from src.datasets.main import generate
 
@@ -60,7 +60,7 @@ def _pred(model_type: str) -> Path:
 
 @app.command("syntetic")
 def generate_command(
-    dataset_type: Literal["vanilla", "coherent", "simple_spatial", "simple_timing"] = typer.Option(
+    dataset_type: Literal["simple_spatial", "simple_timing", "simple_delta"] = typer.Option(
         ...,
         "--type",
         help="Dataset syntetic to generate.",
