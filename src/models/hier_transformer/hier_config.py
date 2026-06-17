@@ -9,6 +9,7 @@ from src.config import config
 _MODEL_ARCH_SECTION = "model.hierTransformer.architecture"
 _MODEL_TRAINING_SECTION = "model.hierTransformer.training"
 _MODEL_PATHS_SECTION = "model.hierTransformer.paths"
+_MODEL_PERTURB_SECTION = "model.hierTransformer.perturbation"
 _MISSING = object()
 
 
@@ -117,6 +118,11 @@ class TrainingConfig:
     pred_file_name: str = _cfg_str(_MODEL_PATHS_SECTION, "pred_file_name", "window_embeddings.csv")
     ckpt_dir: Path = field(default_factory=lambda: _cfg_path(_MODEL_PATHS_SECTION, "ckpt_dir", Path("checkpoints")))
 
+    # Perturbation analysis: which column to perturb ("" = all) and where to write the report.
+    perturb_column: str | None = _cfg_optional_str(_MODEL_PERTURB_SECTION, "column", None)
+    perturb_path: Path = field(default_factory=lambda: _cfg_path(_MODEL_PERTURB_SECTION, "folder", Path("data/pred/eval")))
+    perturb_file_name: str = _cfg_str(_MODEL_PERTURB_SECTION, "file", "perturbation.csv")
+
     seq_len: int = _cfg_int(_MODEL_TRAINING_SECTION, "seq_len", 32)
     windows_per_client: int = _cfg_int(_MODEL_TRAINING_SECTION, "windows_per_client", 4)
     clients_per_batch: int = _cfg_int(_MODEL_TRAINING_SECTION, "clients_per_batch", 8)
@@ -145,6 +151,7 @@ class TrainingConfig:
     def __post_init__(self) -> None:
         self.train_path = Path(self.train_path)
         self.pred_path = Path(self.pred_path)
+        self.perturb_path = Path(self.perturb_path)
         self.ckpt_dir = Path(self.ckpt_dir)
         if not self.pred_file_name:
             raise ValueError("`model.hierTransformer.paths.pred_file_name` cannot be empty.")

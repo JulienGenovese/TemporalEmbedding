@@ -30,6 +30,11 @@ pred_path = "data/pred"
 pred_file_name = "pred_embeddings.csv"
 ckpt_dir = "checkpoints"
 
+[model.hierTransformer.perturbation]
+column = ""                 # column to perturb (importo/merchant/cocau/delta_t); "" = all
+folder = "data/pred/eval"   # output folder for the report
+file = "perturbation.csv"   # output file name
+
 [model.hierTransformer.training]
 seq_len = 32
 windows_per_client = 4

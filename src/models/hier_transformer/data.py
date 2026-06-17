@@ -56,23 +56,10 @@ class TransactionDataset(Dataset):
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
-        # Resolve per-feature numpy dtype from the source DataFrame.
-        # float -> float32, integer -> int64, object/string -> int64 (FNV-1a hashed).
-        self._col_dtypes: dict[str, type] = {}
-        self._col_is_string: dict[str, bool] = {}
-        for col in self.feature_cols:
-            s = df[col]
-            if pd.api.types.is_float_dtype(s):
-                self._col_dtypes[col] = np.float32
-                self._col_is_string[col] = False
-            elif pd.api.types.is_integer_dtype(s):
-                self._col_dtypes[col] = np.int64
-                self._col_is_string[col] = False
-            elif pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
-                self._col_dtypes[col] = np.int64
-                self._col_is_string[col] = True
-            else:
-                raise TypeError(f"Unsupported dtype for column '{col}': {s.dtype}")
+        # Logical kind per feature column ('float' | 'int' | 'string'), resolved
+        # once from the source DataFrame. At fetch time the stored array's own
+        # dtype is enough to pick the pad function, so we only need this here.
+        kinds = {col: _column_kind(df[col]) for col in self.feature_cols}
 
         # Pre-compute per-client field arrays once.
         # `client_id` is a factorized integer code (a per-client counter), so
@@ -90,15 +77,15 @@ class TransactionDataset(Dataset):
                 "timestamp": g[timestamp_col].to_numpy(np.int64, copy=True),
             }
             for col in self.feature_cols:
-                if self._col_dtypes[col] == np.float32:
+                if kinds[col] == "float":
                     entry[col] = g[col].to_numpy(np.float32, copy=True)
                     continue
-                if self._col_is_string[col]:
+                if kinds[col] == "string":
                     arr = np.fromiter(
                         (HighCardCategoricalFeature._to_int(v) for v in g[col]),
                         dtype=np.int64, count=len(g),
                     )
-                else:
+                else:  # "int"
                     arr = g[col].to_numpy(np.int64)
                 # Store integer columns at the smallest lossless width to cut RAM
                 # (small-vocab categoricals → int8/int16; the 64-bit merchant hash
@@ -158,15 +145,13 @@ class TransactionDataset(Dataset):
             delta_t[1:] = np.clip(np.diff(ts).astype(np.float32), 0, None)
 
         sample: dict[str, torch.Tensor] = {
-            "delta_t":   _pad_float(delta_t, pad),
-            "timestamp": _pad_long(ts, pad),
+            "delta_t":   _pad(delta_t, pad, np.float32),
+            "timestamp": _pad(ts, pad, np.int64),
         }
         for col in self.feature_cols:
             arr = c[col][start:end]
-            if self._col_dtypes[col] == np.float32:
-                sample[col] = _pad_float(arr, pad)
-            else:
-                sample[col] = _pad_long(arr, pad)
+            dtype = np.float32 if arr.dtype.kind == "f" else np.int64
+            sample[col] = _pad(arr, pad, dtype)
         sample["padding_mask"] = torch.cat([
             torch.zeros(length, dtype=torch.bool),
             torch.ones(pad,    dtype=torch.bool),
@@ -174,17 +159,24 @@ class TransactionDataset(Dataset):
         return sample, int(c["client_id"])
 
 
-def _pad_float(arr: np.ndarray, pad: int) -> torch.Tensor:
-    t = torch.from_numpy(np.asarray(arr, dtype=np.float32))
-    if pad:
-        t = torch.cat([t, torch.zeros(pad, dtype=torch.float32)])
-    return t
+def _column_kind(s: pd.Series) -> str:
+    """'float' | 'int' | 'string' — the only per-column info the Dataset needs.
+
+    float → float32; int → int64; object/string → int64 (FNV-1a hashed).
+    """
+    if pd.api.types.is_float_dtype(s):
+        return "float"
+    if pd.api.types.is_integer_dtype(s):
+        return "int"
+    if pd.api.types.is_object_dtype(s) or pd.api.types.is_string_dtype(s):
+        return "string"
+    raise TypeError(f"Unsupported dtype for column '{s.name}': {s.dtype}")
 
 
-def _pad_long(arr: np.ndarray, pad: int) -> torch.Tensor:
-    t = torch.from_numpy(np.asarray(arr, dtype=np.int64))
+def _pad(arr: np.ndarray, pad: int, dtype) -> torch.Tensor:
+    t = torch.from_numpy(np.asarray(arr, dtype=dtype))
     if pad:
-        t = torch.cat([t, torch.zeros(pad, dtype=torch.int64)])
+        t = torch.cat([t, torch.zeros(pad, dtype=t.dtype)])
     return t
 
 

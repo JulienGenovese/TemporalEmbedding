@@ -58,6 +58,18 @@ def _pred(model_type: str) -> Path:
     raise ValueError(f"Unsupported model type: {model_type}")
 
 
+def _perturb(model_type: str):
+    # `base` is currently routed to the available prediction pipeline.
+    if model_type in {"hier", "base"}:
+        if model_type == "base":
+            logger.info("Model type 'base' currently uses the same prediction pipeline as 'hier'.")
+        from src.eval.perturbation import main
+
+        return main()
+
+    raise ValueError(f"Unsupported model type: {model_type}")
+
+
 @app.command("syntetic")
 def generate_command(
     dataset_type: Literal["simple_spatial", "simple_timing", "simple_delta"] = typer.Option(
@@ -92,6 +104,18 @@ def pred_command(
 ) -> None:
     out_path = _pred(model_type)
     logger.success("Prediction completed: {}", out_path)
+
+
+@app.command("perturb")
+def perturb_command(
+    model_type: Literal["base", "hier"] = typer.Option(
+        "hier",
+        "--type",
+        help="Model variant to analyze.",
+    ),
+) -> None:
+    _perturb(model_type)
+    logger.success("Perturbation analysis completed.")
 
 
 @app.command("plot")
