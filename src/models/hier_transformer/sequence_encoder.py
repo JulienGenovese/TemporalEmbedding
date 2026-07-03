@@ -25,7 +25,7 @@ class TimeDeltaEncoding(nn.Module):
     def __init__(
         self,
         d_model: int = 128,
-        min_timescale: float = 3600.0,
+        min_timescale: float = 60.0,
         max_timescale: float = 1e6,
     ):
         super().__init__()

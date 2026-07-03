@@ -10,8 +10,8 @@ import pandas as pd
 from loguru import logger
 
 from src.config import config
-from ...data_schema import DATA_CONFIG, DataConfig
-from .specs import Merchant
+from src.data_schema import DATA_CONFIG, DataConfig
+from src.datasets.experiments.specs import Merchant
 
 
 class SyntheticExperiment(ABC):

@@ -93,6 +93,11 @@ class NumericNormalizer:
         return self
 
 
+def mtm_mask_key(name: str) -> str:
+    """Batch key carrying the MTM boolean mask (True = masked) for ``name``."""
+    return f"{name}__mtm_mask"
+
+
 class FeatureSpecBase(ABC):
     """Abstract base class for feature specifications."""
 
@@ -113,22 +118,35 @@ class FeatureSpecBase(ABC):
 
 
 class NumericEncoder(nn.Module):
-    """Learnable sin/cos frequency bank + linear projection to d_field."""
+    """Learnable sin/cos frequency bank + linear projection to d_field.
+
+    Positions flagged in ``mtm_mask`` are replaced by a learned [MASK]
+    vector, so masked-token positions are distinguishable from genuine
+    zeros and from padding.
+    """
 
     def __init__(self, d_field: int = 64, n_frequencies: int = 16):
         super().__init__()
         self.frequencies = nn.Parameter(torch.logspace(0, 3, n_frequencies))
         self.projection = nn.Linear(2 * n_frequencies, d_field)
+        self.mask_token = nn.Parameter(torch.randn(d_field) * 0.02)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        mtm_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         angles = x.unsqueeze(-1) * self.frequencies
-        return self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1))
+        out = self.projection(torch.cat([angles.sin(), angles.cos()], dim=-1))
+        if mtm_mask is not None:
+            out = torch.where(mtm_mask.unsqueeze(-1), self.mask_token, out)
+        return out
 
 
 def _decompose_unix_timestamp(
     ts: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Unix seconds -> (hour[1..24], dow[1..7], dom[1..31]); 0 for padding."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Unix seconds -> (hour[1..24], dow[1..7], dom[1..31], month[1..12]); 0 for padding."""
     mask = ts == 0
     hour = (ts // 3600) % 24 + 1
     dow = (ts // 86400 + 3) % 7 + 1
@@ -141,11 +159,13 @@ def _decompose_unix_timestamp(
     e = c - (1461 * d) // 4
     m = (5 * e + 2) // 153
     dom = e - (153 * m + 2) // 5 + 1
+    month = m + 3 - 12 * (m // 10)
 
     return (
         hour.masked_fill(mask, 0),
         dow.masked_fill(mask, 0),
         dom.masked_fill(mask, 0),
+        month.masked_fill(mask, 0),
     )
 
 
@@ -171,16 +191,20 @@ class NumericFeature(FeatureSpecBase):
             return value_encoder
         return nn.ModuleDict({
             "value": value_encoder,
-            "sign": nn.Embedding(3, d_field, padding_idx=0),
+            # 0=pad, 1=pos, 2=neg, 3=[MASK]
+            "sign": nn.Embedding(4, d_field, padding_idx=0),
         })
 
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
         x = batch[self.name]
+        mtm_mask = batch.get(mtm_mask_key(self.name))
         if not self.signed:
-            return [module(self.normalizer(x) if self.normalizer else x)]
+            return [module(self.normalizer(x) if self.normalizer else x, mtm_mask)]
         sign_ids = (x > 0).long() + (x < 0).long() * 2
+        if mtm_mask is not None:
+            sign_ids = sign_ids.masked_fill(mtm_mask, 3)
         norm_abs = self.normalizer(x) if self.normalizer else x.abs()
-        return [module["value"](norm_abs), module["sign"](sign_ids)]
+        return [module["value"](norm_abs, mtm_mask), module["sign"](sign_ids)]
 
 
 @dataclass
@@ -205,30 +229,36 @@ class CategoricalFeature(FeatureSpecBase):
             raise RuntimeError(
                 f"CategoricalFeature('{self.name}'): set vocab_size or call fit() first",
             )
-        return nn.Embedding(self.vocab_size, d_field, padding_idx=0)
+        # one extra row at index vocab_size for the [MASK] token; MTM logits
+        # stay over [0, vocab_size) so [MASK] is never a predicted class
+        return nn.Embedding(self.vocab_size + 1, d_field, padding_idx=0)
 
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
         ids = batch[self.name]
         if self.vocab is not None:
             ids = self.vocab(ids)
+        mtm_mask = batch.get(mtm_mask_key(self.name))
+        if mtm_mask is not None:
+            ids = ids.masked_fill(mtm_mask, module.num_embeddings - 1)
         return [module(ids)]
 
 
 @dataclass
 class DatetimeFeature(FeatureSpecBase):
-    """Unix timestamp decomposed into hour, day-of-week and day-of-month slots."""
+    """Unix timestamp decomposed into hour, day-of-week, day-of-month and month slots."""
 
     name: str
 
     @property
     def n_slots(self) -> int:
-        return 3
+        return 4
 
     def build(self, d_field: int, n_frequencies: int) -> nn.Module:
         return nn.ModuleList([
             nn.Embedding(25, d_field, padding_idx=0),
             nn.Embedding(8, d_field, padding_idx=0),
             nn.Embedding(32, d_field, padding_idx=0),
+            nn.Embedding(13, d_field, padding_idx=0),
         ])
 
     def encode(self, module: nn.Module, batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:

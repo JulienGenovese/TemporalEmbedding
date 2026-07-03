@@ -14,9 +14,9 @@ import pandas as pd
 import torch
 from loguru import logger
 
-from ..data_schema import DATA_CONFIG
-from ..models.hier_transformer.hier_config import HierTransformerConfig
-from ..models.hier_transformer.pred import Predictor
+from src.data_schema import DATA_CONFIG
+from src.models.hier_transformer.hier_config import HierTransformerConfig
+from src.models.hier_transformer.pred import Predictor
 
 PERTURBABLE = [
     DATA_CONFIG.amount_col,

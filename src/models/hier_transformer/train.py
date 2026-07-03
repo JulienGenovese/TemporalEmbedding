@@ -24,7 +24,7 @@ import torch.nn as nn
 from loguru import logger
 from torch.utils.data import DataLoader
 
-from .artifacts import (
+from src.models.hier_transformer.artifacts import (
     HISTORY_FILENAME,
     MODEL_CHECKPOINT_FILENAME,
     RUN_METADATA_FILENAME,
@@ -33,16 +33,17 @@ from .artifacts import (
     create_training_run_dir,
     replace_latest_artifact_dirs,
 )
-from .data import DataModule
-from .features import (
+from src.models.hier_transformer.data import DataModule
+from src.models.hier_transformer.features import (
     DatetimeFeature,
     FeatureSpec,
     HighCardCategoricalFeature,
     NumericFeature,
+    mtm_mask_key,
 )
-from .hier_config import HierTransformerConfig
-from .loss import PretrainLoss, info_nce_metrics
-from .model import EmbeddingModel, count_parameters
+from src.models.hier_transformer.hier_config import HierTransformerConfig
+from src.models.hier_transformer.loss import PretrainLoss, info_nce_metrics
+from src.models.hier_transformer.model import EmbeddingModel, count_parameters
 
 
 EVAL_METRICS = (
@@ -60,7 +61,13 @@ def build_mtm_targets(
     features: list[FeatureSpec],
     mask_prob: float,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Build MTM targets/masks and zero masked inputs in-place."""
+    """Build MTM targets/masks, zero masked inputs and publish the masks.
+
+    Masked positions are zeroed in ``batch[name]`` (so no encoder can see
+    the original value) and the boolean mask is stored under
+    ``mtm_mask_key(name)`` so the feature's ``encode`` substitutes its
+    learned [MASK] representation instead of collapsing onto padding.
+    """
     pad_mask = batch.get("padding_mask")
     targets: dict[str, torch.Tensor] = {}
     masks: dict[str, torch.Tensor] = {}
@@ -79,6 +86,7 @@ def build_mtm_targets(
             mask = mask & ~pad_mask
         masks[name] = mask
         batch[name] = batch[name].masked_fill(mask, 0)
+        batch[mtm_mask_key(name)] = mask
 
     return targets, masks
 

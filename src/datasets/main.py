@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .experiments.abc import SyntheticExperiment
-from .experiments.simple_calendar import SimpleCalendarExperiment
-from .experiments.simple_delta import SimpleDeltaExperiment
-from .experiments.simple_spatial import SimpleSpatialExperiment
-from .types import DatasetType
+from src.datasets.experiments.abc import SyntheticExperiment
+from src.datasets.experiments.simple_calendar import SimpleCalendarExperiment
+from src.datasets.experiments.simple_delta import SimpleDeltaExperiment
+from src.datasets.experiments.simple_spatial import SimpleSpatialExperiment
+from src.datasets.types import DatasetType
 
 EXPERIMENTS: dict[DatasetType, type[SyntheticExperiment]] = {
     DatasetType.SIMPLE_SPATIAL: SimpleSpatialExperiment,

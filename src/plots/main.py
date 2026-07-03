@@ -10,13 +10,13 @@ PlotServer = Callable[[Path], None]
 
 
 def _tensorboard(experiment: str | None = None) -> Path:
-    from .tensorboard import export_tensorboard
+    from src.plots.tensorboard import export_tensorboard
 
     return export_tensorboard(experiment=experiment)
 
 
 def _serve_tensorboard(run_dir: Path) -> None:
-    from .tensorboard import serve_tensorboard
+    from src.plots.tensorboard import serve_tensorboard
 
     serve_tensorboard(run_dir)
 

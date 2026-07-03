@@ -19,7 +19,7 @@ class PerturbationAnalysis(str, Enum):
     SENSIBILITY = "sensibility"
 
 def _classification_hier() -> Path:
-    from .classification_perturbation import ClassificationPerturbationAnalyzer
+    from src.eval.classification_perturbation import ClassificationPerturbationAnalyzer
 
     analyzer = ClassificationPerturbationAnalyzer()
     analyzer()
@@ -27,7 +27,7 @@ def _classification_hier() -> Path:
 
 
 def _sensibility_hier() -> Path:
-    from .sensibility import SensibilityAnalyzer
+    from src.eval.sensibility import SensibilityAnalyzer
 
     analyzer = SensibilityAnalyzer()
     analyzer()

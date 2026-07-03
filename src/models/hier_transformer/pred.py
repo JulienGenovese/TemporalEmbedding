@@ -15,15 +15,15 @@ import torch
 from loguru import logger
 from torch.utils.data import DataLoader
 
-from .artifacts import (
+from src.models.hier_transformer.artifacts import (
     MODEL_CHECKPOINT_FILENAME,
     resolve_artifact_dir,
 )
-from .data import PredictionTransactionDataset, collate_prediction
-from .encoder import TransactionEncoder
-from .features import NumericFeature
-from .hier_config import HierTransformerConfig
-from .model import EmbeddingModel
+from src.models.hier_transformer.data import PredictionTransactionDataset, collate_prediction
+from src.models.hier_transformer.encoder import TransactionEncoder
+from src.models.hier_transformer.features import NumericFeature
+from src.models.hier_transformer.hier_config import HierTransformerConfig
+from src.models.hier_transformer.model import EmbeddingModel
 
 
 class Predictor:
@@ -41,7 +41,7 @@ class Predictor:
         ckpt_path: Path | None = None,
         output_path: Path | None = None,
     ):
-        from .data import DataModule  # local import: avoids import cycle
+        from src.models.hier_transformer.data import DataModule  # local import: avoids import cycle
 
         self.args = args or HierTransformerConfig()
         self.path_config = self.args.paths

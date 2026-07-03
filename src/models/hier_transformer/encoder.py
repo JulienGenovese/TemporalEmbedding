@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .features import (
+from src.models.hier_transformer.features import (
     CategoricalFeature,
     DEFAULT_FEATURES,
     DatetimeFeature,
@@ -74,8 +74,22 @@ class TransactionEncoder(nn.Module):
         return np.asarray(values, dtype=np.int64)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Encode a batch of transactions into per-field embeddings.
+
+        Args:
+            batch: dict mapping each feature name to its (B, T) tensor
+                (float for numerics, long for categoricals / timestamps).
+                May also carry ``<name>__mtm_mask`` boolean keys, consumed
+                by the feature's ``encode`` to inject [MASK] embeddings.
+        Returns:
+            (B, T, n_fields, d_field) — one embedding per field slot, in
+            schema order; a feature contributes ``n_slots`` consecutive
+            slots (e.g. signed numeric → value + sign, datetime → hour /
+            dow / dom / month).
+        """
         fields: list[torch.Tensor] = []
         for feature, encoder in zip(self.features, self.encoders):
+            # each encode() returns n_slots tensors of shape (B, T, d_field)
             fields.extend(feature.encode(encoder, batch))
         return torch.stack(fields, dim=2)
 

@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 from loguru import logger
 
-from .encoder import TransactionEncoder
-from .features import (
+from src.models.hier_transformer.encoder import TransactionEncoder
+from src.models.hier_transformer.features import (
     DEFAULT_FEATURES,
     FeatureSpec,
     NumericFeature,
@@ -13,9 +13,9 @@ from .features import (
     categorical_vocab_sizes,
     numeric_field_names,
 )
-from .field_transformer import FieldTransformer
-from .sequence_encoder import SequenceTransformer
-from .loss import MTMHead, ContrastiveHead
+from src.models.hier_transformer.field_transformer import FieldTransformer
+from src.models.hier_transformer.sequence_encoder import SequenceTransformer
+from src.models.hier_transformer.loss import MTMHead, ContrastiveHead
 
 
 class TransactionTransformer(nn.Module):

@@ -10,10 +10,10 @@ import torch
 from loguru import logger
 from torch.utils.data import DataLoader, Dataset
 
-from ...data_schema import DataConfig as TransactionDataConfig
-from .encoder import TransactionEncoder
-from .features import DEFAULT_FEATURES, FeatureSpec
-from .hier_config import HierTransformerConfig
+from src.data_schema import DataConfig as TransactionDataConfig
+from src.models.hier_transformer.encoder import TransactionEncoder
+from src.models.hier_transformer.features import DEFAULT_FEATURES, FeatureSpec
+from src.models.hier_transformer.hier_config import HierTransformerConfig
 
 
 class BaseTransactionDataset:

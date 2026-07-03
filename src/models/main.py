@@ -6,20 +6,20 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from .types import ModelType
+from src.models.types import ModelType
 
 ModelPipeline = Callable[[], Path]
 ModelAction = Literal["train", "pred"]
 
 
 def _train_hier() -> Path:
-    from .hier_transformer.train import main
+    from src.models.hier_transformer.train import main
 
     return main()
 
 
 def _pred_hier() -> Path:
-    from .hier_transformer.pred import main
+    from src.models.hier_transformer.pred import main
 
     return main()
 

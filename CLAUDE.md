@@ -115,7 +115,7 @@ for feat, enc in zip(self.features, self.encoders):
 | `NumericFeature(name, signed=False)` | `name` (float) | 1 | `NumericEncoder` (learnable sin/cos frequency bank) |
 | `NumericFeature(name, signed=True)`  | `name` (float) | 2 | `NumericEncoder(abs)` + `nn.Embedding(3, d_field)` sign (0=pad/zero, 1=pos, 2=neg) |
 | `CategoricalFeature(name, vocab_size)` | `name` (long) | 1 | `nn.Embedding(vocab_size, d_field, padding_idx=0)` |
-| `DatetimeFeature(name)` | `name` (int64 Unix ts, 0 = pad) | 3 | three `nn.Embedding`s — encoder decomposes via `_decompose_unix_timestamp` into hour[1..24] / dow[1..7] / dom[1..31] using the Fliegel-Van Flandern Julian Day algorithm (all integer tensor arithmetic, GPU-safe) |
+| `DatetimeFeature(name)` | `name` (int64 Unix ts, 0 = pad) | 4 | four `nn.Embedding`s — encoder decomposes via `_decompose_unix_timestamp` into hour[1..24] / dow[1..7] / dom[1..31] / month[1..12] using the Fliegel-Van Flandern Julian Day algorithm (all integer tensor arithmetic, GPU-safe) |
 | `HighCardCategoricalFeature(name, hash_buckets=5003)` | `name` (long, raw int IDs — strings can be pre-converted via `HighCardCategoricalFeature.prepare`/`._to_int` which uses FNV-1a) | 1 | two independent `nn.Embedding`s, summed (double-hash computed internally via Knuth multiplicative constants) |
 
 **Adding a new feature type** = one new dataclass with `build` / `encode` / `n_slots`, zero changes
@@ -130,12 +130,12 @@ DEFAULT_FEATURES = [
     NumericFeature("importo", signed=True),   # → 2 slots
     HighCardCategoricalFeature("merchant"),    # → 1 slot
     CategoricalFeature("cocau", 501),          # → 1 slot
-    DatetimeFeature("timestamp"),              # → 3 slots (hour / dow / dom)
-]                                              # total = 7 field slots
+    DatetimeFeature("timestamp"),              # → 4 slots (hour / dow / dom / month)
+]                                              # total = 8 field slots
 ```
 
 The `timestamp` column is therefore used twice: embedded as calendar components
-(hour/day-of-week/day-of-month) by the `DatetimeFeature`, and consumed at load time to derive
+(hour/day-of-week/day-of-month/month) by the `DatetimeFeature`, and consumed at load time to derive
 `delta_t` for the time-aware positional encoding. `DatetimeFeature` is never an MTM target.
 
 ### Consequence: loss heads track the schema
@@ -243,9 +243,14 @@ they overlay on the same chart distinguished by the run legend. The random accur
 The x-axis is the global training step throughout — per-epoch val points are placed at the step that
 closed their epoch.
 
-Note: numeric MTM targets are **normalised** — `Trainer._build_mtm_targets` applies each
+Note: numeric MTM targets are **normalised** — `build_mtm_targets` applies each
 `NumericFeature.normalizer` (clip → log1p → z-score) so the smooth-L1 term lives on the same scale as
 the encoder input and the categorical cross-entropy, rather than being dominated by the raw euro
 magnitudes of `importo`. **It also zeroes out masked positions in the batch before `model(batch)`**
-so the encoder cannot see the values it is asked to predict.
+so the encoder cannot see the values it is asked to predict, and publishes each boolean mask in the
+batch under `mtm_mask_key(name)` (`<name>__mtm_mask`). The feature's `encode` consumes that key and
+substitutes a learned **[MASK] representation** — an extra embedding row at index `vocab_size` for
+`CategoricalFeature` (the MTM logits stay over `[0, vocab_size)`), a learned `mask_token` vector
+inside `NumericEncoder`, and sign index 3 for signed numerics — so masked positions are
+distinguishable from padding (index 0) and receive gradient.
 </content>

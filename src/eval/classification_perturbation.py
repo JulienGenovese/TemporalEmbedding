@@ -22,11 +22,11 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from ..data_schema import DATA_CONFIG
-from ..models.hier_transformer.artifacts import dataset_name_from_path
-from ..models.hier_transformer.hier_config import HierTransformerConfig
-from ..models.hier_transformer.pred import Predictor
-from .sensibility import PERTURBABLE
+from src.data_schema import DATA_CONFIG
+from src.models.hier_transformer.artifacts import dataset_name_from_path
+from src.models.hier_transformer.hier_config import HierTransformerConfig
+from src.models.hier_transformer.pred import Predictor
+from src.eval.sensibility import PERTURBABLE
 
 CLASSIFICATION_REPORT_FILENAME = "classification_perturbation.csv"
 

@@ -31,9 +31,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ...data_schema import DATA_CONFIG
-from .abc import SyntheticExperiment
-from .specs import Merchant, MerchantConfig, _merchant_catalog, load_timing_config
+from src.data_schema import DATA_CONFIG
+from src.datasets.experiments.abc import SyntheticExperiment
+from src.datasets.experiments.specs import Merchant, MerchantConfig, _merchant_catalog, load_timing_config
 
 _SECTION = "synthetic.simple_delta"
 

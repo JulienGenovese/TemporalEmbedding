@@ -21,9 +21,9 @@ import pandas as pd
 
 from src.config import config
 
-from ...data_schema import DATA_CONFIG
-from .abc import SyntheticExperiment
-from .specs import (
+from src.data_schema import DATA_CONFIG
+from src.datasets.experiments.abc import SyntheticExperiment
+from src.datasets.experiments.specs import (
     Merchant,
     MerchantConfig,
     SimpleClientType,
