@@ -292,6 +292,7 @@ DEFAULT_FEATURES: list[FeatureSpec] = [
     NumericFeature("importo", signed=True),
     HighCardCategoricalFeature("merchant"),
     CategoricalFeature("cocau", 501),
+    DatetimeFeature("timestamp"),
 ]
 
 

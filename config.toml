@@ -1,45 +1,34 @@
-# Two independent draws from the same distributions: a larger `train` split and a
-# smaller `pred` split (different seed so the sampled clients differ).
-[dataset.sampling.train]
-n_transactions = 400000
-n_clients = 4000
-alpha_dirichlet = 1.5
-min_tx_per_client = 50
+[synthetic.simple_spatial]
+output = "data/transactions_simple_spatial.csv"
+amount_blend_factor = 0.5
 seed = 42
 
-[dataset.sampling.pred]
-n_transactions = 100000
-n_clients = 1000
-alpha_dirichlet = 1.5
-min_tx_per_client = 50
-seed = 1234
+[synthetic.simple_delta]
+output = "data/transactions_simple_delta.csv"
+seed = 42
 
-[syntentic.simple_spatial]
-folder = "data"
-name_file = "transactions_simple_spatial"
-ext = ".csv"
+[synthetic.simple_calendar]
+output = "data/transactions_simple_calendar.csv"
+seed = 42
 
-[syntentic.simple_delta]
-folder = "data"
-name_file = "transactions_simple_delta"
-ext = ".csv"
+[synthetic.timing]
+ts_base = 1577836800
+ts_range = 126144000
+day = 86400
 
-[model.hierTransformer.paths]
-train_path = "data/transactions_simple_spatial_train.csv"
-pred_path = "data/pred"
-pred_file_name = "pred_embeddings.csv"
-ckpt_dir = "checkpoints"
+[model.hier_transformer.paths]
+train_path = "data/transactions_simple_delta_train.csv"
+pred_input_path = "data/transactions_simple_delta_pred.csv"
+pred_output_path = "data/output/pred_simple_delta_embeddings.csv"
+model_output_dir = "model_artifacts"
 
-[model.hierTransformer.perturbation]
-column = ""                 # column to perturb (importo/merchant/cocau/delta_t); "" = all
-folder = "data/pred/eval"   # output folder for the report
-file = "perturbation.csv"   # output file name
+[model.hier_transformer.data]
+seq_len = 25
+pred_windows_per_client = 8
+clients_per_batch = 16
+train_windows_per_client = 6
 
-[model.hierTransformer.training]
-seq_len = 32
-windows_per_client = 4
-clients_per_batch = 8
-windows_per_pair = 2
+[model.hier_transformer.training]
 epochs = 30
 mask_prob = 0.15
 contrastive_weight = 0.5
@@ -52,9 +41,12 @@ val_every = 1
 early_stopping_patience = 5
 early_stopping_min_delta = 0.0
 log_every = 5
+
+[model.hier_transformer.runtime]
+device = "gpu"
 seed = 0
 
-[model.hierTransformer.architecture]
+[model.hier_transformer.architecture]
 d_field = 64
 d_model = 128
 n_frequencies = 16
@@ -64,3 +56,16 @@ seq_n_layers = 4
 seq_n_heads = 8
 dim_feedforward = 512
 dropout = 0.1
+time_alpha_init = 0.1
+
+[model.hier_transformer.perturbation]
+column = ""
+output_path = "model_artifacts/simple_delta/perturbation.csv"
+classification_output_path = "model_artifacts/classification_perturbation.csv"
+classification_test_size = 0.3
+classification_max_iter = 1000
+classification_n_seeds = 5
+
+[model.plot]
+history = "model_artifacts/history.json"
+runs_dir = "model_artifacts/tensorboard"

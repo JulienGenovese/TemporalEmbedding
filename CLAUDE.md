@@ -123,18 +123,20 @@ elsewhere.
 
 `TransactionEncoder.n_fields` is computed from the schema and is passed into `FieldTransformer`
 (which sizes its learnable field-type positional encoding accordingly). The default schema lives in
-`model.py` as `DEFAULT_FEATURES`:
+`features.py` as `DEFAULT_FEATURES`:
 
 ```python
 DEFAULT_FEATURES = [
     NumericFeature("importo", signed=True),   # → 2 slots
     HighCardCategoricalFeature("merchant"),    # → 1 slot
     CategoricalFeature("cocau", 501),          # → 1 slot
-]                                              # total = 4 field slots
+    DatetimeFeature("timestamp"),              # → 3 slots (hour / dow / dom)
+]                                              # total = 7 field slots
 ```
 
-It does **not** include a `DatetimeFeature`: the `timestamp` column is loaded into the batch but
-consumed only to derive `delta_t`, not embedded.
+The `timestamp` column is therefore used twice: embedded as calendar components
+(hour/day-of-week/day-of-month) by the `DatetimeFeature`, and consumed at load time to derive
+`delta_t` for the time-aware positional encoding. `DatetimeFeature` is never an MTM target.
 
 ### Consequence: loss heads track the schema
 
