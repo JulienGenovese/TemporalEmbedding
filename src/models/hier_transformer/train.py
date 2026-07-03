@@ -3,8 +3,9 @@ End-to-end pre-training of :class:`EmbeddingModel` on a synthetic CSV dataset.
 
 Reads ``data/transactions.csv`` (produced by :mod:`src.make_dataset`),
 fits per-feature normalizers/vocabularies, and runs the joint
-MTM + InfoNCE objective.  Default hyper-parameters (see
-:class:`src.config.TrainingConfig`) are sized for a CPU smoke test
+MTM + InfoNCE objective. Default settings (see
+:class:`src.models.hier_transformer.hier_config.HierTransformerConfig`) are sized
+for a CPU smoke test
 (~3-5 min on a laptop).
 
 Usage:
@@ -23,17 +24,80 @@ import torch.nn as nn
 from loguru import logger
 from torch.utils.data import DataLoader
 
-from .hier_config import TrainingConfig
-from .data import DataModule
-from .encoder import (
-    DatetimeFeature, FeatureSpec, HighCardCategoricalFeature, NumericFeature,
+from .artifacts import (
+    HISTORY_FILENAME,
+    MODEL_CHECKPOINT_FILENAME,
+    RUN_METADATA_FILENAME,
+    TRAIN_EVAL_HISTORY_FILENAME,
+    VAL_HISTORY_FILENAME,
+    create_training_run_dir,
+    replace_latest_artifact_dirs,
 )
+from .data import DataModule
+from .features import (
+    DatetimeFeature,
+    FeatureSpec,
+    HighCardCategoricalFeature,
+    NumericFeature,
+)
+from .hier_config import HierTransformerConfig
 from .loss import PretrainLoss, info_nce_metrics
 from .model import EmbeddingModel, count_parameters
 
 
+EVAL_METRICS = (
+    "loss",
+    "loss_mtm",
+    "loss_contrastive",
+    "infonce_acc",
+    "infonce_acc_random",
+    "infonce_lift",
+)
+
+
+def build_mtm_targets(
+    batch: dict[str, torch.Tensor],
+    features: list[FeatureSpec],
+    mask_prob: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Build MTM targets/masks and zero masked inputs in-place."""
+    pad_mask = batch.get("padding_mask")
+    targets: dict[str, torch.Tensor] = {}
+    masks: dict[str, torch.Tensor] = {}
+
+    for feat in features:
+        if isinstance(feat, (HighCardCategoricalFeature, DatetimeFeature)):
+            continue
+        name = feat.name
+        if isinstance(feat, NumericFeature) and feat.normalizer is not None:
+            targets[name] = feat.normalizer(batch[name])
+        else:
+            targets[name] = batch[name].clone()
+
+        mask = torch.rand_like(batch[name], dtype=torch.float32) < mask_prob
+        if pad_mask is not None:
+            mask = mask & ~pad_mask
+        masks[name] = mask
+        batch[name] = batch[name].masked_fill(mask, 0)
+
+    return targets, masks
+
+
+def mean_metrics(
+    metrics: dict[str, list[float]],
+    epoch: int,
+) -> dict[str, float]:
+    """Average accumulated scalar metrics for one epoch."""
+    n_batches = len(metrics["loss"])
+    denom = max(n_batches, 1)
+    return {
+        "epoch": epoch,
+        "n_batches": n_batches,
+        **{name: sum(values) / denom for name, values in metrics.items()},
+    }
+
+
 class Trainer:
-    
     """Pre-training loop encapsulated as a callable object.
 
     Owns the model, loss, dataloader and optimizer; ``__call__`` runs the
@@ -42,16 +106,21 @@ class Trainer:
 
     def __init__(
         self,
-        args: TrainingConfig,
+        args: HierTransformerConfig,
         model: EmbeddingModel,
         loss: PretrainLoss,
         loader: DataLoader,
         val_loader: DataLoader | None = None,
     ):
         self.args = args
+        self.path_config = args.paths
+        self.training_config = args.training
+        self.runtime_config = args.runtime
         self.loader = loader
         self.val_loader = val_loader
-        self.device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = self.runtime_config.device or (
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
         logger.info("Device is : {}", self.device)
 
         # Mixed precision: float16 autocast on CUDA only (CPU keeps full
@@ -65,16 +134,20 @@ class Trainer:
         self.loss = loss.to(self.device)
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay,
+            lr=self.training_config.lr,
+            weight_decay=self.training_config.weight_decay,
         )
         self.scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            self.optimizer, gamma=args.lr_gamma,
+            self.optimizer, gamma=self.training_config.lr_gamma,
         )
 
-        self.ckpt_dir = Path(args.ckpt_dir)
-        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Checkpoint directory: {}", self.ckpt_dir.resolve())
+        self.artifacts_root = Path(self.path_config.model_output_dir)
+        self.dataset_name, self.run_id, self.model_output_dir = create_training_run_dir(
+            artifacts_root=self.artifacts_root,
+            train_path=self.path_config.train_path,
+        )
+        logger.info("Model artifacts root: {}", self.artifacts_root.resolve())
+        logger.info("Training artifact directory: {}", self.model_output_dir.resolve())
 
         param_stats = count_parameters(self.model)
         logger.info("Model parameters: {:,} total", param_stats["total"])
@@ -83,12 +156,17 @@ class Trainer:
             "Optimizer: AdamW(lr={}, weight_decay={}), "
             "ExponentialLR(gamma={}), grad_clip={}, mask_prob={}, "
             "contrastive_weight={}",
-            args.lr, args.weight_decay, args.lr_gamma, args.grad_clip,
-            args.mask_prob, args.contrastive_weight,
+            self.training_config.lr,
+            self.training_config.weight_decay,
+            self.training_config.lr_gamma,
+            self.training_config.grad_clip,
+            self.training_config.mask_prob,
+            self.training_config.contrastive_weight,
         )
         if self.val_loader is not None:
             logger.info(
-                "Validation enabled: every {} epoch(s)", max(1, args.val_every),
+                "Validation enabled: every {} epoch(s)",
+                max(1, self.training_config.val_every),
             )
         else:
             logger.info("Validation disabled (no val_loader)")
@@ -96,16 +174,17 @@ class Trainer:
         # Early stopping: monitors the validation loss. Only active when a
         # val_loader exists and val_every > 0 — otherwise there is no signal.
         self.early_stopping = (
-            args.early_stopping_patience > 0
+            self.training_config.early_stopping_patience > 0
             and self.val_loader is not None
-            and args.val_every > 0
+            and self.training_config.val_every > 0
         )
         if self.early_stopping:
             logger.info(
                 "Early stopping enabled: patience={} val check(s), min_delta={}",
-                args.early_stopping_patience, args.early_stopping_min_delta,
+                self.training_config.early_stopping_patience,
+                self.training_config.early_stopping_min_delta,
             )
-        elif args.early_stopping_patience > 0:
+        elif self.training_config.early_stopping_patience > 0:
             logger.warning(
                 "Early stopping requested but inactive (needs a val_loader "
                 "and val_every > 0)",
@@ -123,42 +202,6 @@ class Trainer:
     def __call__(self) -> Path:
         return self._train()
 
-    def _build_mtm_targets(
-        self,
-        batch: dict[str, torch.Tensor],
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-        """Copy original values as targets, build per-field boolean masks,
-        and zero out masked positions in ``batch`` so the encoder cannot
-        see them.  Padded positions are never masked.  Hash and datetime
-        fields are not MTM targets (consistent with :class:`MTMHead`).
-
-        Numeric targets are normalised (clip → log1p → z-score) so the
-        smooth-L1 term lives on the same scale as the encoder input and
-        the categorical cross-entropy, instead of being dominated by the
-        raw euro magnitudes of ``importo``.
-        """
-        pad_mask = batch.get("padding_mask")
-        targets: dict[str, torch.Tensor] = {}
-        masks: dict[str, torch.Tensor] = {}
-
-        for feat in self.model.features:
-            # TODO: capire perche' datetime non possa essere previsto
-            if isinstance(feat, (HighCardCategoricalFeature, DatetimeFeature)):
-                continue
-            name = feat.name
-            if isinstance(feat, NumericFeature) and feat.normalizer is not None:
-                targets[name] = feat.normalizer(batch[name])
-            else:
-                targets[name] = batch[name].clone()
-            # decide quali posizioni mascherare
-            m = torch.rand_like(batch[name], dtype=torch.float32) < self.args.mask_prob
-            if pad_mask is not None:
-                m = m & ~pad_mask
-            masks[name] = m
-            batch[name] = batch[name].masked_fill(m, 0)
-
-        return targets, masks
-
     def _forward_and_loss(
         self,
         batch: dict[str, torch.Tensor],
@@ -174,7 +217,11 @@ class Trainer:
         batch = {k: v.to(self.device) for k, v in batch.items()}
         client_ids = client_ids.to(self.device)
 
-        targets, mtm_mask = self._build_mtm_targets(batch)
+        targets, mtm_mask = build_mtm_targets(
+            batch,
+            self.model.features,
+            self.training_config.mask_prob,
+        )
 
         with torch.autocast(device_type=self.device_type, enabled=self.use_amp):
             output = self.model(batch)
@@ -194,7 +241,7 @@ class Trainer:
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.optimizer)
         grad_norm = nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.args.grad_clip,
+            self.model.parameters(), self.training_config.grad_clip,
         )
         self.scaler.step(self.optimizer)
         self.scaler.update()
@@ -212,6 +259,7 @@ class Trainer:
             "infonce_acc_random": float(metrics["infonce_acc_random"].item()),
             "infonce_lift": float(metrics["infonce_lift"].item()),
             "temperature": float(self.model.backbone.contrastive_head.temperature.item()),
+            "time_alpha": float(output["time_alpha"].item()),
             "grad_norm": float(grad_norm.item()),
             "lr": float(self.optimizer.param_groups[0]["lr"]),
             "mtm_breakdown": {
@@ -221,7 +269,7 @@ class Trainer:
         return entry
 
     def _epoch(self, epoch: int) -> float:
-        logger.info("=== Epoch {}/{} ===", epoch, self.args.epochs)
+        logger.info("=== Epoch {}/{} ===", epoch, self.training_config.epochs)
         epoch_losses: list[float] = []
         for batch, client_ids in self.loader:
             entry = self._step(batch, client_ids)
@@ -229,12 +277,13 @@ class Trainer:
             self.history.append(entry)
             epoch_losses.append(entry["loss"])
 
-            if self.step % self.args.log_every == 0 or self.step == 1:
+            if self.step % self.training_config.log_every == 0 or self.step == 1:
                 logger.info(
                     "[TRAIN] epoch {} step {:>4} | loss={:.4f} mtm={:.4f} con={:.4f} "
-                    "acc={:.3f} rand={:.3f} lift={:.3f}",
+                    "time_alpha={:.4f} acc={:.3f} rand={:.3f} lift={:.3f}",
                     epoch, self.step, entry["loss"],
                     entry["loss_mtm"], entry["loss_contrastive"],
+                    entry["time_alpha"],
                     entry["infonce_acc"], entry["infonce_acc_random"],
                     entry["infonce_lift"],
                 )
@@ -259,10 +308,7 @@ class Trainer:
         for the epoch.
         """
         self.model.eval()
-        agg: dict[str, list[float]] = {
-            "loss": [], "loss_mtm": [], "loss_contrastive": [],
-            "infonce_acc": [], "infonce_acc_random": [], "infonce_lift": [],
-        }
+        agg: dict[str, list[float]] = {name: [] for name in EVAL_METRICS}
         with torch.no_grad():
             for batch, client_ids in loader:
                 output, losses, client_ids = self._forward_and_loss(batch, client_ids)
@@ -276,17 +322,69 @@ class Trainer:
                 agg["infonce_lift"].append(float(metrics["infonce_lift"].item()))
         self.model.train()
 
-        n = max(len(agg["loss"]), 1)
-        return {
-            "epoch": epoch,
-            "n_batches": len(agg["loss"]),
-            "loss": sum(agg["loss"]) / n,
-            "loss_mtm": sum(agg["loss_mtm"]) / n,
-            "loss_contrastive": sum(agg["loss_contrastive"]) / n,
-            "infonce_acc": sum(agg["infonce_acc"]) / n,
-            "infonce_acc_random": sum(agg["infonce_acc_random"]) / n,
-            "infonce_lift": sum(agg["infonce_lift"]) / n,
-        }
+        return mean_metrics(agg, epoch)
+
+    @staticmethod
+    def _metric_values(entry: dict[str, float]) -> tuple[float, ...]:
+        return (
+            entry["loss"],
+            entry["loss_mtm"],
+            entry["loss_contrastive"],
+            entry["infonce_acc"],
+            entry["infonce_acc_random"],
+            entry["infonce_lift"],
+        )
+
+    def _log_eval(
+        self,
+        epoch: int,
+        train_eval: dict[str, float],
+        val_eval: dict[str, float] | None,
+    ) -> None:
+        if val_eval is None:
+            logger.info(
+                "[EVAL] epoch {} | TRAIN: loss={:.4f} mtm={:.4f} "
+                "con={:.4f} acc={:.3f} rand={:.3f} lift={:.3f} "
+                "(no validation loader)",
+                epoch,
+                *self._metric_values(train_eval),
+            )
+            return
+
+        logger.info(
+            "[EVAL] epoch {} | "
+            "TRAIN: loss={:.4f} mtm={:.4f} con={:.4f} "
+            "acc={:.3f} rand={:.3f} lift={:.3f} | "
+            "VALIDATION: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
+            "rand={:.3f} lift={:.3f}",
+            epoch,
+            *self._metric_values(train_eval),
+            *self._metric_values(val_eval),
+        )
+
+    def _run_eval(self, epoch: int) -> bool:
+        train_eval = self._eval_epoch(self.loader, epoch)
+        self.train_eval_history.append(train_eval)
+
+        val_eval = None
+        if self.val_loader is not None:
+            val_eval = self._eval_epoch(self.val_loader, epoch)
+            self.val_history.append(val_eval)
+
+        self._log_eval(epoch, train_eval, val_eval)
+        if (
+            val_eval is not None
+            and self.early_stopping
+            and self._check_early_stopping(val_eval["loss"], epoch)
+        ):
+            logger.info(
+                "Early stopping at epoch {} — no improvement for "
+                "{} validation check(s)",
+                epoch,
+                self.training_config.early_stopping_patience,
+            )
+            return True
+        return False
 
     def _check_early_stopping(self, val_loss: float, epoch: int) -> bool:
         """Update best-checkpoint bookkeeping from ``val_loss``.
@@ -296,7 +394,10 @@ class Trainer:
         no-improvement counter.  Returns ``True`` when patience is exhausted
         and training should stop.
         """
-        if val_loss < self.best_val_loss - self.args.early_stopping_min_delta:
+        if (
+            val_loss
+            < self.best_val_loss - self.training_config.early_stopping_min_delta
+        ):
             self.best_val_loss = val_loss
             self.best_epoch = epoch
             self.epochs_no_improve = 0
@@ -312,61 +413,30 @@ class Trainer:
         self.epochs_no_improve += 1
         logger.info(
             "No val-loss improvement for {}/{} check(s) (best {:.4f} @ epoch {})",
-            self.epochs_no_improve, self.args.early_stopping_patience,
+            self.epochs_no_improve,
+            self.training_config.early_stopping_patience,
             self.best_val_loss, self.best_epoch,
         )
-        return self.epochs_no_improve >= self.args.early_stopping_patience
+        return self.epochs_no_improve >= self.training_config.early_stopping_patience
 
     def _train(self) -> Path:
-        torch.manual_seed(self.args.seed)
+        torch.manual_seed(self.runtime_config.seed)
         self.model.train()
 
-        logger.info("Starting training: {} epoch(s)", self.args.epochs)
-        for epoch in range(1, self.args.epochs + 1):
+        logger.info("Starting training: {} epoch(s)", self.training_config.epochs)
+        for epoch in range(1, self.training_config.epochs + 1):
             self._epoch(epoch)
             self.scheduler.step()
             logger.info(
                 "LR after epoch {}: {:.2e}",
                 epoch, self.optimizer.param_groups[0]["lr"],
             )
-            if self.args.val_every > 0 and epoch % self.args.val_every == 0:
-                train_eval = self._eval_epoch(self.loader, epoch)
-                self.train_eval_history.append(train_eval)
-                if self.val_loader is not None:
-                    val_eval = self._eval_epoch(self.val_loader, epoch)
-                    self.val_history.append(val_eval)
-                    logger.info(
-                        "[EVAL] epoch {} | "
-                        "TRAIN: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
-                        "rand={:.3f} lift={:.3f} | "
-                        "VALIDATION: loss={:.4f} mtm={:.4f} con={:.4f} acc={:.3f} "
-                        "rand={:.3f} lift={:.3f}",
-                        epoch,
-                        train_eval["loss"], train_eval["loss_mtm"],
-                        train_eval["loss_contrastive"], train_eval["infonce_acc"],
-                        train_eval["infonce_acc_random"], train_eval["infonce_lift"],
-                        val_eval["loss"], val_eval["loss_mtm"],
-                        val_eval["loss_contrastive"], val_eval["infonce_acc"],
-                        val_eval["infonce_acc_random"], val_eval["infonce_lift"],
-                    )
-                    if self.early_stopping and self._check_early_stopping(
-                        val_eval["loss"], epoch,
-                    ):
-                        logger.info(
-                            "Early stopping at epoch {} — no improvement for "
-                            "{} validation check(s)",
-                            epoch, self.args.early_stopping_patience,
-                        )
-                        break
-                else:
-                    logger.info(
-                        "[EVAL] epoch {} | TRAIN: loss={:.4f} mtm={:.4f} "
-                        "con={:.4f} acc={:.3f} rand={:.3f} lift={:.3f} "
-                        "(no validation loader)",
-                        epoch, train_eval["loss"], train_eval["loss_mtm"],
-                        train_eval["loss_contrastive"], train_eval["infonce_acc"],
-                        train_eval["infonce_acc_random"], train_eval["infonce_lift"],
-                    )
+            if (
+                self.training_config.val_every > 0
+                and epoch % self.training_config.val_every == 0
+            ):
+                if self._run_eval(epoch):
+                    break
         logger.info("Training complete after {} steps", self.step)
 
         if self.best_state is not None:
@@ -378,10 +448,11 @@ class Trainer:
         return self._save()
 
     def _save(self) -> Path:
-        final_path = self.ckpt_dir / "model_final.pt"
-        history_path = self.ckpt_dir / "history.json"
-        train_eval_path = self.ckpt_dir / "train_eval_history.json"
-        val_history_path = self.ckpt_dir / "val_history.json"
+        final_path = self.model_output_dir / MODEL_CHECKPOINT_FILENAME
+        history_path = self.model_output_dir / HISTORY_FILENAME
+        train_eval_path = self.model_output_dir / TRAIN_EVAL_HISTORY_FILENAME
+        val_history_path = self.model_output_dir / VAL_HISTORY_FILENAME
+        metadata_path = self.model_output_dir / RUN_METADATA_FILENAME
         logger.info("Saving final checkpoint → {}", final_path)
         self.model.save(
             final_path,
@@ -396,18 +467,32 @@ class Trainer:
         if self.val_history:
             logger.info("Saving val history → {}", val_history_path)
             val_history_path.write_text(json.dumps(self.val_history, indent=2))
-        logger.success("All artifacts written under {}", self.ckpt_dir.resolve())
+        metadata_path.write_text(json.dumps(
+            {
+                "dataset": self.dataset_name,
+                "run_id": self.run_id,
+                "train_path": str(self.path_config.train_path),
+                "artifact_dir": str(self.model_output_dir),
+            },
+            indent=2,
+        ))
+        replace_latest_artifact_dirs(
+            artifacts_root=self.artifacts_root,
+            dataset=self.dataset_name,
+            run_dir=self.model_output_dir,
+        )
+        logger.success("All artifacts written under {}", self.model_output_dir.resolve())
         return final_path
 
 
 def main() -> Path:
-    args = TrainingConfig()
-    logger.info("TrainingConfig: {}", args)
+    args = HierTransformerConfig()
+    logger.info("HierTransformerConfig: {}", args)
 
     data = DataModule(args)
     train_loader, val_loader, features = data()
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device = args.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu")
     use_ckpt = device != "cpu"
     logger.info(
         "Building EmbeddingModel (device={}, gradient_checkpointing={})",
@@ -419,14 +504,10 @@ def main() -> Path:
         use_gradient_checkpointing=use_ckpt,
         **asdict(args.model),
     )
-    loss = PretrainLoss(contrastive_weight=args.contrastive_weight)
+    loss = PretrainLoss(contrastive_weight=args.training.contrastive_weight)
 
     trainer = Trainer(
         args=args, model=model, loss=loss,
         loader=train_loader, val_loader=val_loader,
     )
     return trainer()
-
-
-if __name__ == "__main__":
-    main()

@@ -2,149 +2,138 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Literal
+from typing import Annotated, NoReturn
 
 import typer
 from loguru import logger
 
+from src.datasets.main import generate as generate_dataset
+from src.datasets.types import DatasetType
+from src.eval import main as eval_main
+from src.models import main as model_main
+from src.models.types import ModelType
+from src.plots import main as plot_main
+
 app = typer.Typer(add_completion=False)
 
-
-def _syntetic(
-    dataset_type: Literal["simple_spatial", "simple_timing", "simple_delta"],
-) -> dict[str, Path]:
-    from src.datasets.main import generate
-
-    return generate(dataset_type=dataset_type)
-
-
-def _train(model_type: str) -> Path:
-    # `base` is currently routed to the available training pipeline.
-    if model_type in {"hier", "base"}:
-        if model_type == "base":
-            logger.info("Model type 'base' currently uses the same training pipeline as 'hier'.")
-        from src.models.hier_transformer.train import main
-
-        return main()
-
-    raise ValueError(f"Unsupported model type: {model_type}")
-
-
-def _plot(model_type: str, history: str | None, runs_dir: str | None) -> None:
-    # `base` and `hier` share the same exporter at the moment.
-    if model_type not in {"hier", "base"}:
-        raise ValueError(f"Unsupported model type: {model_type}")
-
-    from src.plots.tensorboard import main
-
-    if model_type == "base":
-        logger.info("Model type 'base' currently uses the same plotting pipeline as 'hier'.")
-
-    resolved_history = Path(history) if history else Path("checkpoints") / "history.json"
-    resolved_runs_dir = Path(runs_dir) if runs_dir else Path("runs") / model_type
-    main(history_path=resolved_history, runs_dir=resolved_runs_dir)
-
-
-def _pred(model_type: str) -> Path:
-    # `base` is currently routed to the available prediction pipeline.
-    if model_type in {"hier", "base"}:
-        if model_type == "base":
-            logger.info("Model type 'base' currently uses the same prediction pipeline as 'hier'.")
-        from src.models.hier_transformer.pred import main
-
-        return main()
-
-    raise ValueError(f"Unsupported model type: {model_type}")
-
-
-def _perturb(model_type: str):
-    # `base` is currently routed to the available prediction pipeline.
-    if model_type in {"hier", "base"}:
-        if model_type == "base":
-            logger.info("Model type 'base' currently uses the same prediction pipeline as 'hier'.")
-        from src.eval.perturbation import main
-
-        return main()
-
-    raise ValueError(f"Unsupported model type: {model_type}")
-
-
-@app.command("syntetic")
-def generate_command(
-    dataset_type: Literal["simple_spatial", "simple_timing", "simple_delta"] = typer.Option(
-        ...,
+DatasetTypeOption = Annotated[
+    DatasetType,
+    typer.Option(
         "--type",
-        help="Dataset syntetic to generate.",
+        "-t",
+        help="Synthetic dataset to generate.",
     ),
-) -> None:
-    output_paths = _syntetic(dataset_type)
+]
+ModelTypeOption = Annotated[
+    ModelType,
+    typer.Option(
+        "--type",
+        "-t",
+        help="Model variant to use.",
+    ),
+]
+
+
+PerturbationAnalysisOption = Annotated[
+    eval_main.PerturbationAnalysis,
+    typer.Option(
+        "--analysis",
+        "-a",
+        help="Perturbation analysis to run.",
+    ),
+]
+
+
+PlotTypeOption = Annotated[
+    str,
+    typer.Option(
+        "--type",
+        "-t",
+        help="Plot backend to use.",
+    ),
+]
+PlotServeOption = Annotated[
+    bool,
+    typer.Option(
+        "--serve",
+        help="Start the plot UI after exporting.",
+    ),
+]
+PlotExperimentOption = Annotated[
+    str | None,
+    typer.Option(
+        "--experiment",
+        "-e",
+        help=(
+            "Artifact experiment to plot, e.g. latest, simple_spatial, "
+            "or simple_spatial/2026-06-19_17-25-00."
+        ),
+    ),
+]
+
+
+def _exit_user_error(exc: Exception) -> NoReturn:
+    typer.secho(str(exc), fg=typer.colors.RED, err=True)
+    raise typer.Exit(code=1) from exc
+
+
+@app.command("synthetic")
+def synthetic_command(dataset_type: DatasetTypeOption) -> None:
+    try:
+        output_paths = generate_dataset(dataset_type=dataset_type)
+    except (ValueError, KeyError, TypeError) as exc:
+        _exit_user_error(exc)
     for split, path in output_paths.items():
         logger.success("Dataset generated ({}): {}", split, path)
 
+
 @app.command("train")
-def train_command(
-    model_type: Literal["base", "hier"] = typer.Option(
-        "hier",
-        "--type",
-        help="Model variant to train.",
-    ),
-) -> None:
-    ckpt_path = _train(model_type)
-    logger.success("Training completed: {}", ckpt_path)
+def train_command(model_type: ModelTypeOption = ModelType.HIER) -> None:
+    try:
+        output = model_main.main(action="train", model_type=model_type)
+    except (ValueError, KeyError, TypeError, FileNotFoundError) as exc:
+        _exit_user_error(exc)
+    logger.success("Training completed: {}", output)
 
 
 @app.command("pred")
-def pred_command(
-    model_type: Literal["base", "hier"] = typer.Option(
-        "hier",
-        "--type",
-        help="Model variant to predict.",
-    ),
-) -> None:
-    out_path = _pred(model_type)
-    logger.success("Prediction completed: {}", out_path)
+def pred_command(model_type: ModelTypeOption = ModelType.HIER) -> None:
+    try:
+        output = model_main.main(action="pred", model_type=model_type)
+    except (ValueError, KeyError, TypeError, FileNotFoundError) as exc:
+        _exit_user_error(exc)
+    logger.success("Prediction completed: {}", output)
 
 
-@app.command("perturb")
-def perturb_command(
-    model_type: Literal["base", "hier"] = typer.Option(
-        "hier",
-        "--type",
-        help="Model variant to analyze.",
-    ),
+@app.command("perturbation")
+def perturbation_command(
+    model_type: ModelTypeOption = ModelType.HIER,
+    analysis: PerturbationAnalysisOption = eval_main.PerturbationAnalysis.SENSIBILITY,
 ) -> None:
-    _perturb(model_type)
-    logger.success("Perturbation analysis completed.")
+    try:
+        output = eval_main.main(
+            analysis=analysis.value,
+            model_type=model_type,
+        )
+    except (ValueError, KeyError, TypeError, FileNotFoundError) as exc:
+        _exit_user_error(exc)
+    logger.success("Perturbation analysis completed: {}", output)
 
 
 @app.command("plot")
 def plot_command(
-    model_type: Literal["base", "hier"] = typer.Option(
-        "hier",
-        "--type",
-        help="Model variant to plot.",
-    ),
-    history: Path | None = typer.Option(
-        None,
-        "--history",
-        help="Path to history.json (default: checkpoints/history.json).",
-    ),
-    runs_dir: Path | None = typer.Option(
-        None,
-        "--runs-dir",
-        help="Parent directory for TensorBoard runs (default: runs/<type>).",
-    ),
+    plot_type: PlotTypeOption = "tensorboard",
+    experiment: PlotExperimentOption = None,
+    serve: PlotServeOption = False,
 ) -> None:
-    _plot(model_type, str(history) if history else None, str(runs_dir) if runs_dir else None)
+    try:
+        output = plot_main.main(plot_type=plot_type, experiment=experiment)
+        logger.success("TensorBoard export completed: {}", output)
+        if serve:
+            plot_main.serve(plot_type=plot_type, run_dir=output)
+    except (ValueError, KeyError, TypeError, FileNotFoundError, RuntimeError) as exc:
+        _exit_user_error(exc)
 
 
 def main() -> None:
-    import sys
-
-    normalized_args = ["--type" if arg == "-type" else arg for arg in sys.argv[1:]]
-    app(prog_name="py", args=normalized_args)
-
-
-if __name__ == "__main__":
-    main()
+    app(prog_name="py")

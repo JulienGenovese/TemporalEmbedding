@@ -3,28 +3,39 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
-from .experiments.simple_spatial import generate as generate_simple_spatial
-from .experiments.simple_timing import generate as generate_simple_timing
-from .experiments.simple_delta import generate as generate_simple_delta
-from .utils.config import DatasetConfig
+from .experiments.abc import SyntheticExperiment
+from .experiments.simple_calendar import SimpleCalendarExperiment
+from .experiments.simple_delta import SimpleDeltaExperiment
+from .experiments.simple_spatial import SimpleSpatialExperiment
+from .types import DatasetType
 
-DatasetType = Literal["simple_spatial", "simple_timing", "simple_delta"]
+EXPERIMENTS: dict[DatasetType, type[SyntheticExperiment]] = {
+    DatasetType.SIMPLE_SPATIAL: SimpleSpatialExperiment,
+    DatasetType.SIMPLE_DELTA: SimpleDeltaExperiment,
+    DatasetType.SIMPLE_CALENDAR: SimpleCalendarExperiment,
+}
 
 
 def generate(
-    dataset_type: DatasetType,
-    config: DatasetConfig | None = None,
+    dataset_type: DatasetType | str,
 ) -> dict[str, Path]:
     """Generate a synthetic dataset (train + pred splits) for the requested variant.
 
     Returns a mapping of split name (`train`/`pred`) to the generated file path.
     """
-    if dataset_type == "simple_spatial":
-        return generate_simple_spatial(config=config)
-    if dataset_type == "simple_timing":
-        return generate_simple_timing(config=config)
-    if dataset_type == "simple_delta":
-        return generate_simple_delta(config=config)
-    raise ValueError(f"Unsupported dataset type: {dataset_type}")
+    try:
+        normalized_dataset_type = DatasetType(dataset_type)
+    except ValueError as exc:
+        supported_types = ", ".join(variant.value for variant in DatasetType)
+        raise ValueError(
+            f"Unsupported dataset type: {dataset_type}. Supported values: {supported_types}."
+        ) from exc
+
+    experiment_class = EXPERIMENTS.get(normalized_dataset_type)
+    if experiment_class is None:
+        supported_types = ", ".join(variant.value for variant in EXPERIMENTS)
+        raise ValueError(
+            f"Unsupported dataset type: {dataset_type}. Supported values: {supported_types}."
+        )
+    return experiment_class().generate()

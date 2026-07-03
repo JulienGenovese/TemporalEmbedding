@@ -6,8 +6,9 @@ from typing import Any, Mapping
 
 try:
     import tomllib
-except ModuleNotFoundError: # pragma: no cover - py311+ usa tomllib stdlib
+except ModuleNotFoundError:  # pragma: no cover - py311+ usa tomllib stdlib
     import tomli as tomllib
+
 
 
 def _default_config_path() -> Path:
@@ -48,13 +49,66 @@ class Config:
             raise KeyError(f"`{section}` is not a section.")
         return current
 
-    def get(self, section: str, key: str, default: Any = _MISSING) -> Any:
+    def get(
+        self,
+        section: str,
+        key: str,
+        default: Any = _MISSING,
+        *,
+        value_type: type | tuple[type, ...] | None = None,
+    ) -> Any:
         section_data = self._resolve_section(section)
         if key in section_data:
-            return section_data[key]
-        if default is _MISSING:
+            value = section_data[key]
+        elif default is _MISSING:
             raise KeyError(f"Key `{key}` not found in section `{section}`.")
-        return default
+        else:
+            value = default
+
+        if value_type is None:
+            return value
+        return self._validate_type(section, key, value, value_type)
+
+    @staticmethod
+    def _validate_type(
+        section: str,
+        key: str,
+        value: Any,
+        value_type: type | tuple[type, ...],
+    ) -> Any:
+        if value_type is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(
+                    f"`{section}.{key}` must be an integer, got {type(value).__name__}.",
+                )
+            return value
+
+        if value_type is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(
+                    f"`{section}.{key}` must be numeric, got {type(value).__name__}.",
+                )
+            return float(value)
+
+        if value_type is Path:
+            if isinstance(value, Path):
+                return value
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"`{section}.{key}` must be a string path, got {type(value).__name__}.",
+                )
+            return Path(value)
+
+        if not isinstance(value, value_type):
+            expected = (
+                " or ".join(t.__name__ for t in value_type)
+                if isinstance(value_type, tuple)
+                else value_type.__name__
+            )
+            raise TypeError(
+                f"`{section}.{key}` must be {expected}, got {type(value).__name__}.",
+            )
+        return value
 
 
 def load_config(config_path: Path | str | None = None) -> Config:

@@ -1,19 +1,10 @@
-"""
-Pre-training heads and loss functions.
-
-MTMHead              — Masked Token Modeling head (categorical + numeric reconstruction)
-ContrastiveHead      — InfoNCE projection head with learnable temperature
-info_nce_loss        — InfoNCE (NT-Xent) contrastive loss with in-batch negatives
-mtm_loss             — combined MTM loss (cross-entropy + smooth-L1)
-combined_pretrain_loss — L_MTM + λ * L_contrastive
-"""
+"""Pre-training heads and loss functions."""
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
 
 
 class ContrastiveHead(nn.Module):
@@ -48,9 +39,11 @@ class ContrastiveHead(nn.Module):
         return F.normalize(z, dim=-1)
 
 
-def info_nce_loss(z: torch.Tensor, 
-                  client_ids: torch.Tensor,
-                  temperature: torch.Tensor) -> torch.Tensor:
+def info_nce_loss(
+    z: torch.Tensor,
+    client_ids: torch.Tensor,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
     """InfoNCE (NT-Xent) contrastive loss with in-batch negatives.
 
     Positive pairs: subsequences from the same client.
@@ -86,14 +79,12 @@ def info_nce_loss(z: torch.Tensor,
     return loss
 
 
-# https://towardsdatascience.com/self-supervised-learning-using-projection-heads-b77af3911d33/
 class MTMHead(nn.Module):
     """Masked Token Modeling head.
 
     Reconstructs masked fields:
     - Categorical fields: linear → vocab logits → cross-entropy
     - Numeric fields: linear → scalar → smooth-L1
-    - Full transaction masking: linear → d_model vector → MSE
     """
 
     def __init__(
@@ -120,9 +111,6 @@ class MTMHead(nn.Module):
             for name in numeric_names
         })
 
-        # Full transaction reconstruction head
-        self.full_recon = nn.Linear(d_model, d_model)
-
     def forward(self, hidden_states: torch.Tensor) -> dict:
         """
         Args:
@@ -135,7 +123,6 @@ class MTMHead(nn.Module):
             preds[f"cat_{name}"] = head(hidden_states)              # (B, T, vocab)
         for name, head in self.num_heads.items():
             preds[f"num_{name}"] = head(hidden_states).squeeze(-1)  # (B, T)
-        preds["full_recon"] = self.full_recon(hidden_states)        # (B, T, d_model)
         return preds
 
 def mtm_loss(
@@ -166,10 +153,10 @@ def mtm_loss(
         if name in mask and mask[name].any():
             logits = preds[key][mask[name]]        # (N_masked, vocab)
             target = targets[name][mask[name]]     # (N_masked,)
-            l = F.cross_entropy(logits, target)
-            total_loss = total_loss + l
+            field_loss = F.cross_entropy(logits, target)
+            total_loss = total_loss + field_loss
             n_terms += 1
-            breakdown[key] = l.detach()
+            breakdown[key] = field_loss.detach()
 
     # Numeric losses — driven by whatever num_heads are present in preds
     for key in preds:
@@ -179,10 +166,10 @@ def mtm_loss(
         if name in mask and mask[name].any():
             pred_vals = preds[key][mask[name]]       # (N_masked,)
             target_vals = targets[name][mask[name]]  # (N_masked,)
-            l = F.smooth_l1_loss(pred_vals, target_vals)
-            total_loss = total_loss + l
+            field_loss = F.smooth_l1_loss(pred_vals, target_vals)
+            total_loss = total_loss + field_loss
             n_terms += 1
-            breakdown[key] = l.detach()
+            breakdown[key] = field_loss.detach()
 
     total = total_loss / max(n_terms, 1)
     if return_breakdown:
@@ -237,42 +224,8 @@ def info_nce_metrics(
     return {"infonce_acc": acc, "infonce_acc_random": acc_random, "infonce_lift": lift}
 
 
-def combined_pretrain_loss(
-    output: dict,
-    targets: dict,
-    mtm_mask: dict,
-    client_ids: torch.Tensor,
-    contrastive_weight: float = 0.5,
-) -> dict[str, torch.Tensor]:
-    """Combined pre-training loss: L = L_MTM + λ * L_contrastive.
-
-    Returns dict with individual losses for logging.
-    """
-    l_mtm, mtm_breakdown = mtm_loss(
-        output["mtm_preds"], targets, mtm_mask, return_breakdown=True,
-    )
-    l_contrastive = info_nce_loss(
-        output["contrastive_z"],
-        client_ids,
-        output.get("temperature", torch.tensor(0.07)),
-    )
-    total = l_mtm + contrastive_weight * l_contrastive
-
-    return {
-        "loss": total,
-        "loss_mtm": l_mtm.detach(),
-        "loss_contrastive": l_contrastive.detach(),
-        "mtm_breakdown": mtm_breakdown, # mtm per ogni singolo campo.
-    }
-
-
 class PretrainLoss(nn.Module):
-    """Callable wrapper around :func:`combined_pretrain_loss`.
-
-    Holds the contrastive weight so the training loop can treat the loss
-    as a regular ``nn.Module`` (movable to device, registrable inside a
-    larger module, callable via ``loss(output, targets, mask, ids)``).
-    """
+    """Combined pre-training loss: L = L_MTM + λ * L_contrastive."""
 
     def __init__(self, contrastive_weight: float = 0.5):
         super().__init__()
@@ -285,6 +238,22 @@ class PretrainLoss(nn.Module):
         mtm_mask: dict[str, torch.Tensor],
         client_ids: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        return combined_pretrain_loss(
-            output, targets, mtm_mask, client_ids, self.contrastive_weight,
+        loss_mtm, mtm_breakdown = mtm_loss(
+            output["mtm_preds"],
+            targets,
+            mtm_mask,
+            return_breakdown=True,
         )
+        loss_contrastive = info_nce_loss(
+            output["contrastive_z"],
+            client_ids,
+            output["temperature"],
+        )
+        loss = loss_mtm + self.contrastive_weight * loss_contrastive
+
+        return {
+            "loss": loss,
+            "loss_mtm": loss_mtm.detach(),
+            "loss_contrastive": loss_contrastive.detach(),
+            "mtm_breakdown": mtm_breakdown,
+        }

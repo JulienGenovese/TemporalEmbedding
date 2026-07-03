@@ -67,59 +67,51 @@ uv sync
 > Usa i comandi come `uv run py <comando> ...`.
 > Per vedere tutti i comandi: `uv run py --help`.
 
+Per eseguire un esperimento end-to-end tra quelli disponibili (`simple_spatial`,
+`simple_delta` o `simple_calendar`: generazione dati, training, predizione
+embedding e analisi di perturbazione):
+
+```bash
+uv run python run_experiment.py simple_spatial
+uv run python run_experiment.py simple_delta
+uv run python run_experiment.py simple_calendar
+```
+
 ## 1. Generare i dati sintetici
 
 I comandi da usare sono:
 
 ```bash
-uv run py generate --type vanilla
-uv run py generate --type coherent
+uv run py synthetic --type simple_spatial
+uv run py synthetic --type simple_delta
+uv run py synthetic --type simple_calendar
 ```
 
-Genera un CSV sintetico (di default ~400.000 transazioni su 4.000 clienti).
+Ogni esecuzione genera due split (`train` e `pred`) per il tipo scelto.
 
-### Modificare noise e altri parametri del generatore
+### Modificare i parametri del generatore
 
-I parametri del dato sintetico stanno in `src/datasets/utils/config.py`.
-I default di `SamplingConfig` sono letti da `config.toml`, sezione `[dataset.sampling]`.
-Il `noise_level` è letto da `[dataset.sampling]`, mentre i parametri specifici del dataset `coherent` sono letti da `[syntentic.coherent]`:
+La configurazione runtime è gestita da `src/config.py` (singleton `config`), letta da `config.toml`.
+Nei generatori sintetici i valori vengono presi direttamente con:
 
-- `NoiseConfig.noise_level` (range `[0, 1]`)
-- `AmountConfig.merchant_amount_weight` (range `[0, 1]`, usato in `coherent`)
+```python
+from src.config import config
+config.get("synthetic.simple_spatial", "output", value_type=Path)
+```
 
-I path di output sono separati per esperimento e definiti con:
-- `folder`
-- `name_file`
-- `ext` (`csv`/`.csv` oppure `parquet`/`.parquet`; altri valori generano errore)
-
-nelle sezioni:
-- `[syntentic.vanilla]`
-- `[syntentic.coherent]`
-
-Il filename finale include automaticamente il noise level (es. `transactions_coherent_noise_0_90.csv`), e il file salvato (CSV o parquet) include anche la colonna `noise_level`.
-
-Il parametro principale del rumore è:
-
-- `NoiseConfig.noise_level` (default `0.9`, range `[0, 1]`)
-
-Con questo valore vengono ricalcolati automaticamente:
-
-- `p_offpattern`
-- `p_global_merchant`
-- `p_refund`
-- `sigma_spending`
-
-Altri parametri utili da modificare nello stesso file:
+Sezioni/chiavi principali in `config.toml`:
 
 | Sezione | Parametri principali | Effetto |
 |---|---|---|
-| `SamplingConfig` | `n_transactions`, `n_clients`, `alpha_dirichlet`, `min_tx_per_client`, `seed`, `noise_level` (in `config.toml` → `[dataset.sampling]`) | volume dataset, distribuzione transazioni per cliente e livello di rumore globale |
-| `AmountConfig` | `spending_probability`, `lognormal_sigma`, `merchant_amount_weight` (in `config.toml` → `[syntentic.coherent]`) | frequenza addebiti/accrediti, dispersione importi e bilanciamento client/merchant nel dataset `coherent` |
-| `MerchantConfig` | `common_merchants`, `p_common_merchant`, pool merchant | varietà e pattern merchant |
-| `CategoricalConfig` | `cocau_vocab`, `p_noise` | cardinalità categorie e rumore categorico |
-| `OutputConfig` | `folder`, `name_file`, `ext` (in `config.toml` → `[syntentic.vanilla]`, `[syntentic.coherent]`) | path file (CSV/parquet) per esperimento con suffix automatico `noise_level` |
+| `[synthetic.simple_spatial]`, `[synthetic.simple_delta]`, `[synthetic.simple_calendar]` | `seed`, `output` | seed RNG e path output per esperimento (file distinti per split: `*_train`, `*_pred`) |
+| `[synthetic.timing]` | `ts_base`, `ts_range`, `day` | finestra temporale della simulazione |
 
-`--type` (oppure `-type`) supporta solo `vanilla` o `coherent`.
+Le cardinalità/forme dei cluster sintetici (`n_clients`, distribuzioni importi, ecc.) sono definite nei file esperimento:
+- `src/datasets/experiments/simple_spatial.py`
+- `src/datasets/experiments/simple_delta.py`
+- `src/datasets/experiments/simple_calendar.py`
+
+`--type` (oppure `-t`) supporta `simple_spatial`, `simple_delta`, `simple_calendar`.
 
 ## 2. Addestrare il modello
 
@@ -128,14 +120,14 @@ Avvia il pre-addestramento end-to-end:
 ```bash
 uv run py train
 uv run py train --type hier
-uv run py train --type base
+uv run py train -t hier
 ```
 
-`--type` (oppure `-type`) ha default `hier`.  
-`base` è supportato dalla CLI e al momento usa la stessa pipeline di training di `hier`.
+`--type` (oppure `-t`) ha default `hier`.
 
 Con le impostazioni di default l'addestramento dura pochi minuti su CPU. Al termine
-trovi sotto `checkpoints/`:
+trovi gli artifact sotto `model_artifacts/<dataset>/<data-training>/`, con
+`model_artifacts/latest/` aggiornato all'ultimo training:
 
 | File                      | Contenuto                                                  |
 |---------------------------|------------------------------------------------------------|
@@ -151,41 +143,89 @@ Dopo il training puoi generare gli embedding finestra-per-finestra:
 ```bash
 uv run py pred
 uv run py pred --type hier
-uv run py pred --type base
+uv run py pred -t hier
 ```
 
-Il comando usa il checkpoint `checkpoints/model_final.pt`, legge il dataset da
-`[model.hierTransformer.paths].train_path` e salva l'output in
-`[model.hierTransformer.paths].pred_path/[model.hierTransformer.paths].pred_file_name`.
+Il comando usa il modello `model_artifacts/latest/model_final.pt`, legge il dataset da
+`[model.hier_transformer.paths].pred_input_path` e salva l'output in
+`[model.hier_transformer.paths].pred_output_path` (path completo file, es. `data/pred/pred_embeddings.csv`).
+
+### Analisi di perturbazione
+
+Per misurare quanto ogni variabile influenzi gli embedding:
+
+```bash
+uv run py perturbation
+uv run py perturbation --type hier
+uv run py perturbation -t hier
+uv run py perturbation --analysis classification
+uv run py perturbation --analysis sensibility
+```
+
+Con `--analysis sensibility` il comando ricalcola gli embedding dopo aver
+permutato le colonne configurate in `src/eval/sensibility.py` e salva il report
+CSV in
+`[model.hier_transformer.perturbation].output_path` (default:
+`model_artifacts/perturbation.csv`).
+Con `--analysis classification` addestra una regressione logistica sugli
+embedding puliti per predire la label `cluster`, poi ripredice il cluster sugli
+embedding ottenuti permutando una colonna e misura il calo di accuratezza/F1. Il
+report viene salvato in una sottodirectory derivata dal dataset di input
+`[model.hier_transformer.paths].pred_input_path`; per esempio, con il default
+`classification_output_path = "model_artifacts/classification_perturbation.csv"` e input
+`data/transactions_simple_spatial_pred.csv`, l'output diventa
+`model_artifacts/simple_spatial/classification_perturbation.csv`.
+Per limitare l'analisi a una sola colonna, imposta
+`[model.hier_transformer.perturbation].column` in `config.toml` (per esempio `delta_t`).
 
 ### Modificare parametri training e modello
 
 I parametri stanno in `src/models/hier_transformer/hier_config.py`, con default letti da `config.toml`:
 
-- `TrainingConfig`: parametri di training/dataloader
+- `HierTransformerConfig`: contenitore top-level del pipeline gerarchico
+- `PathsConfig`: path di input/output e directory artifact
+- `DataPipelineConfig`: finestratura e batching (`seq_len`, `pred_windows_per_client`, `clients_per_batch`, `train_windows_per_client`)
+- `TrainingConfig`: ottimizzazione e validazione (`epochs`, `mask_prob`, `contrastive_weight`, `lr`, `weight_decay`, `lr_gamma`, ...)
+- `RuntimeConfig`: device e seed
+- `PerturbationConfig`: colonna, path e opzioni per le analisi di perturbazione
 - `ModelConfig`: parametri architettura Transformer
 
 Sezioni TOML del modello:
 
-- `[model.hierTransformer.paths]`
-- `[model.hierTransformer.training]`
-- `[model.hierTransformer.architecture]`
+- `[model.hier_transformer.paths]`
+- `[model.hier_transformer.data]`
+- `[model.hier_transformer.training]`
+- `[model.hier_transformer.runtime]`
+- `[model.hier_transformer.architecture]`
+- `[model.hier_transformer.perturbation]`
+
+Parametri data pipeline più usati (`DataPipelineConfig`):
+
+| Parametro | Default | Significato |
+|---|---|---|
+| `seq_len` | 32 | lunghezza finestra temporale |
+| `pred_windows_per_client` | 4 | finestre deterministiche per cliente in prediction |
+| `clients_per_batch` | 8 | clienti distinti per batch |
+| `train_windows_per_client` | 2 | finestre generate per cliente in ogni batch InfoNCE |
 
 Parametri training più usati (`TrainingConfig`):
 
 | Parametro | Default | Significato |
 |---|---|---|
 | `epochs` | 30 | numero epoche |
-| `seq_len` | 32 | lunghezza finestra temporale |
-| `clients_per_batch` | 8 | clienti distinti per batch |
-| `windows_per_pair` | 2 | finestre per coppia InfoNCE |
 | `mask_prob` | 0.15 | quota di feature mascherate (MTM) |
 | `contrastive_weight` | 0.5 | peso parte contrastiva della loss |
 | `lr` | 3e-4 | learning rate |
 | `weight_decay` | 0.01 | regolarizzazione AdamW |
 | `lr_gamma` | 0.95 | decay esponenziale del LR per epoca |
 | `val_frac` | 0.2 | quota clienti in validazione |
-| `device` | `None` | auto-select (`cuda` se disponibile, altrimenti `cpu`) |
+
+Parametri runtime più usati (`RuntimeConfig`):
+
+| Parametro | Default | Significato |
+|---|---|---|
+| `device` | `gpu` | usa CUDA (`cpu` per forzare CPU) |
+| `seed` | 0 | seed condiviso per split/sampling |
 
 Parametri modello (`ModelConfig`):
 
@@ -200,6 +240,7 @@ Parametri modello (`ModelConfig`):
 | `dim_feedforward` | 512 | dimensione FFN dei blocchi Transformer |
 | `dropout` | 0.1 | dropout globale |
 | `n_frequencies` | 16 | frequenze sin/cos per encoder numerico |
+| `time_alpha_init` | 0.1 | valore iniziale del gate appreso che scala il time-delta encoding |
 
 ## 3. Visualizzare i risultati dell'addestramento
 
@@ -207,12 +248,21 @@ Esporta la storia del training su TensorBoard:
 
 ```bash
 uv run py plot
-uv run py plot --type hier
-uv run py plot --type base --history checkpoints/history.json --runs-dir runs/base
-uv run tensorboard --logdir runs
+uv run py plot --type tensorboard
+uv run py plot --type tensorboard --experiment simple_spatial
+uv run py plot --type tensorboard --experiment simple_spatial/2026-06-19_17-25-00
+uv run py plot --type tensorboard --serve
 ```
 
-`plot` è un comando dedicato della CLI (non un'opzione di `train`).
+`plot` è un comando dedicato della CLI (non un'opzione di `train`) e al momento
+supporta solo l'export `tensorboard`.
+Senza `--experiment` esporta l'ultimo training (`latest`); con `--experiment`
+puoi scegliere una sottocartella artifact specifica.
+Usa `--serve` per lanciare direttamente la UI TensorBoard dopo l'export. Nel
+selettore **Run** di TensorBoard trovi gli esperimenti esportati con i sub-run
+`train`, `val` e `random`, così le metriche omonime sono sovrapposte negli
+stessi grafici.
+I path di input/output per `plot` sono configurati in `[model.plot]` su `config.toml`.
 
 ## Verifica rapida (facoltativa)
 
@@ -226,4 +276,4 @@ uv run python -m src.models.hier_transformer.model
 ---
 
 Per i dettagli sull'architettura e sul design schema-driven dell'encoder, vedi
-`copilot.md`.
+`.github/copilot-instructions.md`.

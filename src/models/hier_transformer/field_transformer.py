@@ -1,4 +1,4 @@
-"""Field Transformer — intra-transaction attention over fields. See architecture/field_transformer.md."""
+"""Field Transformer: intra-transaction attention over fields."""
 
 
 import torch
@@ -18,37 +18,25 @@ class AttentionPooling(nn.Module):
         self.attn = nn.MultiheadAttention(d_model, num_heads=1, batch_first=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: (B*T, n_fields, d_model)
-        Returns:
-            (B*T, d_model)
-        """
-        BT = x.size(0)
-        q = self.query.expand(BT, -1, -1)  # (B*T, 1, d_model)
-        out, _ = self.attn(q, x, x)        # (B*T, 1, d_model)
-        return out.squeeze(1)               # (B*T, d_model)
+        batch_transactions = x.size(0)
+        query = self.query.expand(batch_transactions, -1, -1)
+        out, _ = self.attn(query, x, x)
+        return out.squeeze(1)
 
 
 class FieldTransformer(nn.Module):
-    """Intra-transaction attention over fields.
+    """Intra-transaction attention over fields."""
 
-    Projects d_field → d_model, adds field-type positional encoding,
-    applies 2 Transformer encoder layers, then attention-pools to a
-    single vector per transaction.
-
-    Input:  (B, T, n_fields, d_field)
-    Output: (B, T, d_model)
-    """
-
-    def __init__(self, 
-                 n_fields: int = 13,
-                 d_field: int = 64, 
-                 d_model: int = 128,
-                 n_layers: int = 2,
-                 n_heads: int = 4, 
-                 dim_feedforward: int = 512,
-                 dropout: float = 0.1):
+    def __init__(
+        self,
+        n_fields: int = 13,
+        d_field: int = 64,
+        d_model: int = 128,
+        n_layers: int = 2,
+        n_heads: int = 4,
+        dim_feedforward: int = 512,
+        dropout: float = 0.1,
+    ):
         super().__init__()
         self.d_model = d_model
 
@@ -70,29 +58,18 @@ class FieldTransformer(nn.Module):
 
         self.layer_norm = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor, padding_mask: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x: (B, T, n_fields, d_field)
-            padding_mask: (B, T) — True where transactions are padded
         Returns:
             (B, T, d_model)
         """
-        B, T, F, _ = x.shape
+        batch_size, seq_len, n_fields, _ = x.shape
 
-        # Project and add field-type encoding
-        x = self.input_proj(x) + self.field_type_emb  # (B, T, F, d_model)
-
-        # Reshape to process all transactions in parallel: (B*T, F, d_model)
-        x = x.reshape(B * T, F, self.d_model)
-
-        # Transformer encoder
-        x = self.encoder(x)  # (B*T, F, d_model)
-
-        # Attention pooling over fields
-        x = self.pool(x)  # (B*T, d_model)
-
-        # Reshape back
-        x = x.reshape(B, T, self.d_model)  # (B, T, d_model)
-
+        x = self.input_proj(x) + self.field_type_emb
+        x = x.reshape(batch_size * seq_len, n_fields, self.d_model)
+        x = self.encoder(x)
+        x = self.pool(x)
+        x = x.reshape(batch_size, seq_len, self.d_model)
         return self.layer_norm(x)

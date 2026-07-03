@@ -2,21 +2,20 @@
 
 import torch
 import torch.nn as nn
+from loguru import logger
 
-from .encoder import (
-    TransactionEncoder,
-    NumericFeature, NumericNormalizer,
-    CategoricalFeature, DatetimeFeature, HighCardCategoricalFeature,
-    FeatureSpec, categorical_vocab_sizes, numeric_field_names,
+from .encoder import TransactionEncoder
+from .features import (
+    DEFAULT_FEATURES,
+    FeatureSpec,
+    NumericFeature,
+    NumericNormalizer,
+    categorical_vocab_sizes,
+    numeric_field_names,
 )
 from .field_transformer import FieldTransformer
 from .sequence_encoder import SequenceTransformer
 from .loss import MTMHead, ContrastiveHead
-
-
-# Default feature schema — 4 field slots:
-#   importo(signed) → 2, merchant(hash) → 1, cocau → 1   total = 4
-
 
 
 class TransactionTransformer(nn.Module):
@@ -40,10 +39,12 @@ class TransactionTransformer(nn.Module):
         seq_n_heads: int = 8,
         dim_feedforward: int = 512,
         dropout: float = 0.1,
+        time_alpha_init: float = 0.1,
         use_gradient_checkpointing: bool = True,
         pretrain: bool = True,
     ):
-        assert features is not None, "'features' can't be None"
+        if features is None:
+            raise ValueError("'features' can't be None")
         super().__init__()
 
         # --- Backbone ---
@@ -63,6 +64,7 @@ class TransactionTransformer(nn.Module):
             n_heads=seq_n_heads,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
+            time_alpha_init=time_alpha_init,
             use_gradient_checkpointing=use_gradient_checkpointing,
         )
 
@@ -76,35 +78,24 @@ class TransactionTransformer(nn.Module):
             )
             self.contrastive_head = ContrastiveHead(d_model)
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """
-        Args:
-            batch: dict with field tensors (B, T) + 'delta_t' + optional 'padding_mask'
-        Returns:
-            dict with:
-                'h_cls': (B, d_model) — client embedding
-                if pretrain:
-                    'mtm_preds': dict of field predictions
-                    'contrastive_z': (B, d_proj) — normalized projections
-        """
+    def _encode_client(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         padding_mask = batch.get("padding_mask", None)  # (B, T), True=padded
-
-        # 1. Encode raw fields → (B, T, n_fields, d_field)
         field_embeddings = self.encoder(batch)
-
-        # 2. Field Transformer → (B, T, d_model)
-        transaction_embeddings = self.field_transformer(field_embeddings, padding_mask)
-
-        # 3. Sequence Transformer → (B, d_model)
+        transaction_embeddings = self.field_transformer(field_embeddings)
         h_cls = self.sequence_transformer(
             transaction_embeddings,
             delta_t=batch["delta_t"],
             padding_mask=padding_mask,
         )
+        return h_cls, transaction_embeddings
 
+    def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        h_cls, transaction_embeddings = self._encode_client(batch)
         output = {"h_cls": h_cls}
-
-        # 4. Pre-training heads
+        output["time_alpha"] = self.sequence_transformer.time_alpha
         if self.pretrain:
             output["mtm_preds"] = self.mtm_head(transaction_embeddings)
             output["contrastive_z"] = self.contrastive_head(h_cls)
@@ -121,10 +112,8 @@ class TransactionTransformer(nn.Module):
             (B, d_model) — client embedding
         """
         with torch.no_grad():
-            padding_mask = batch.get("padding_mask", None)
-            field_emb = self.encoder(batch)
-            tx_emb = self.field_transformer(field_emb, padding_mask)
-            return self.sequence_transformer(tx_emb, batch["delta_t"], padding_mask)
+            h_cls, _ = self._encode_client(batch)
+            return h_cls
 
 
 def count_parameters(model: nn.Module) -> dict[str, int]:
@@ -134,6 +123,19 @@ def count_parameters(model: nn.Module) -> dict[str, int]:
         n = sum(p.numel() for p in child.parameters() if p.requires_grad)
         counts[name] = n
     counts["total"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return counts
+
+
+def count_saved_parameters(model_state: dict[str, torch.Tensor]) -> dict[str, int]:
+    """Count tensor values persisted in a model state dict by sub-module."""
+    counts: dict[str, int] = {}
+    for name, value in model_state.items():
+        if not torch.is_tensor(value):
+            continue
+        parts = name.split(".")
+        module_name = parts[1] if parts[0] == "backbone" and len(parts) > 1 else parts[0]
+        counts[module_name] = counts.get(module_name, 0) + value.numel()
+    counts["total"] = sum(counts.values())
     return counts
 
 
@@ -202,64 +204,15 @@ class EmbeddingModel(nn.Module):
                     feat.normalizer = NumericNormalizer()
                 feat.normalizer.load_state_dict(norm_states[feat.name])
         model = cls(features=features, **kwargs)
-        model.load_state_dict(state["model_state"], strict=strict)
+        model_state = state["model_state"]
+        saved_param_stats = count_saved_parameters(model_state)
+        logger.info(
+            "Saved model parameters: {:,} total",
+            saved_param_stats["total"],
+        )
+        logger.debug("Saved parameter breakdown: {}", saved_param_stats)
+        time_alpha_key = "backbone.sequence_transformer.time_log_alpha"
+        if strict and time_alpha_key not in model_state:
+            model_state[time_alpha_key] = model.state_dict()[time_alpha_key]
+        model.load_state_dict(model_state, strict=strict)
         return model
-
-
-DEFAULT_FEATURES: list[FeatureSpec] = [
-    NumericFeature("importo", signed=True),
-    HighCardCategoricalFeature("merchant"),
-    CategoricalFeature("cocau",  501),
-]
-
-
-# ---------------------------------------------------------------------------
-# Quick test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
-    # Instantiate model
-    model = TransactionTransformer(features=DEFAULT_FEATURES, pretrain=True).to(device)
-
-    # Parameter count
-    params = count_parameters(model)
-    print("\nParameter count:")
-    for name, n in params.items():
-        print(f"  {name}: {n:,}")
-
-    # Dummy batch (B=4, T=32)
-    B, T = 4, 32
-    # Unix timestamps in [2020-01-01, 2024-01-01] range; 0 = padding
-    ts_base = 1577836800  # 2020-01-01 00:00 UTC
-    batch = {
-        # Numeric (float); importo may be negative (signed)
-        "importo":    torch.randn(B, T, device=device) * 500,
-        "delta_t":    torch.abs(torch.randn(B, T, device=device)) * 86400,
-        # Merchant (raw IDs — double hash computed internally)
-        "merchant":   torch.randint(1, 100_000, (B, T), device=device),
-        # Categoricals
-        "cocau": torch.randint(0, 501,  (B, T), device=device),
-        # Datetime as Unix timestamp (int64); encoder decomposes automatically
-        "timestamp":  (torch.randint(0, 126_230_400, (B, T), device=device) + ts_base).long(),
-        # Padding mask (last 8 transactions are padded)
-        "padding_mask": torch.cat([
-            torch.zeros(B, T - 8, dtype=torch.bool, device=device),
-            torch.ones(B, 8, dtype=torch.bool, device=device),
-        ], dim=1),
-    }
-
-    # Forward pass
-    with torch.autocast(device_type=device, dtype=torch.float16, enabled=(device == "cuda")):
-        output = model(batch)
-
-    print(f"\nh_cls shape: {output['h_cls'].shape}")
-    if "contrastive_z" in output:
-        print(f"contrastive_z shape: {output['contrastive_z'].shape}")
-    print(f"MTM pred keys: {list(output.get('mtm_preds', {}).keys())}")
-
-    # Test inference mode
-    emb = model.get_client_embedding(batch)
-    print(f"\nInference embedding shape: {emb.shape}")
-    print("All shapes OK!")
