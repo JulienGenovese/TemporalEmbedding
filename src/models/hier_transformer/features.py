@@ -203,7 +203,7 @@ class NumericFeature(FeatureSpecBase):
         sign_ids = (x > 0).long() + (x < 0).long() * 2
         if mtm_mask is not None:
             sign_ids = sign_ids.masked_fill(mtm_mask, 3)
-        norm_abs = self.normalizer(x) if self.normalizer else x.abs()
+        norm_abs = self.normalizer(x) 
         return [module["value"](norm_abs, mtm_mask), module["sign"](sign_ids)]
 
 

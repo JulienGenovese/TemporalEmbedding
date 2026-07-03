@@ -58,6 +58,12 @@ dim_feedforward = 512
 dropout = 0.1
 time_alpha_init = 0.1
 
+# simplified variant (concat+MLP field fusion): shares every hyper-parameter
+# with model.hier_transformer, only the output destinations differ
+[model.hier_simplified.paths]
+model_output_dir = "model_artifacts_simplified"
+pred_output_path = "data/output/pred_simple_delta_embeddings_simplified.csv"
+
 [model.hier_transformer.perturbation]
 column = ""
 output_path = "model_artifacts/simple_delta/perturbation.csv"

@@ -33,13 +33,19 @@ class Predictor:
     owns the config, data module, model and loader; ``__call__`` runs the full
     prediction schedule (load → build model → embed → save) and returns the
     path of the written embeddings file.
+
+    Subclasses can point ``model_cls`` at an :class:`EmbeddingModel`
+    subclass to predict with a different backbone.
     """
+
+    model_cls: type[EmbeddingModel] = EmbeddingModel
 
     def __init__(
         self,
         args: HierTransformerConfig | None = None,
         ckpt_path: Path | None = None,
         output_path: Path | None = None,
+        features: list | None = None,
     ):
         from src.models.hier_transformer.data import DataModule  # local import: avoids import cycle
 
@@ -55,7 +61,7 @@ class Predictor:
         )
         logger.info("Device is : {}", self.device)
 
-        self.data_module = DataModule(self.args)
+        self.data_module = DataModule(self.args, features=features)
         # Populated lazily during the run.
         self.model: EmbeddingModel | None = None
         self.dataset: PredictionTransactionDataset | None = None
@@ -86,7 +92,7 @@ class Predictor:
 
         features = self.data_module.base_features
         logger.info("Loading checkpoint from {}", model_path)
-        model = EmbeddingModel.load(
+        model = self.model_cls.load(
             model_path,
             features=features,
             map_location=self.device,

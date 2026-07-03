@@ -91,6 +91,7 @@ class TransactionEncoder(nn.Module):
         for feature, encoder in zip(self.features, self.encoders):
             # each encode() returns n_slots tensors of shape (B, T, d_field)
             fields.extend(feature.encode(encoder, batch))
+        # stack impiles a list of n tensor(B,T, d_model) to the second dimension
         return torch.stack(fields, dim=2)
 
 

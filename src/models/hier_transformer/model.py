@@ -145,12 +145,18 @@ class EmbeddingModel(nn.Module):
     Adds production-friendly helpers (``embed`` for inference, ``save``/
     ``load`` for checkpoint round-trip) while keeping the underlying
     backbone fully accessible via ``self.backbone``.
+
+    Subclasses can swap the backbone architecture by overriding
+    ``backbone_cls`` (``save``/``load`` keep working since they go through
+    ``cls``).
     """
+
+    backbone_cls: type[TransactionTransformer] = TransactionTransformer
 
     def __init__(self, features: list[FeatureSpec], **kwargs):
         super().__init__()
         self.features = features
-        self.backbone = TransactionTransformer(features=features, **kwargs)
+        self.backbone = self.backbone_cls(features=features, **kwargs)
         self._init_kwargs = kwargs  # remembered for ``load``
 
     def forward(self, batch: dict[str, "torch.Tensor"]) -> dict[str, "torch.Tensor"]:

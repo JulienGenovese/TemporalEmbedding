@@ -24,12 +24,26 @@ def _pred_hier() -> Path:
     return main()
 
 
+def _train_hier_simplified() -> Path:
+    from src.models.hier_simplified.train import main
+
+    return main()
+
+
+def _pred_hier_simplified() -> Path:
+    from src.models.hier_simplified.pred import main
+
+    return main()
+
+
 PIPELINES: dict[str, dict[ModelType, ModelPipeline]] = {
     "train": {
         ModelType.HIER: _train_hier,
+        ModelType.HIER_SIMPLIFIED: _train_hier_simplified,
     },
     "pred": {
         ModelType.HIER: _pred_hier,
+        ModelType.HIER_SIMPLIFIED: _pred_hier_simplified,
     },
 }
 
